@@ -1,0 +1,656 @@
+---
+title: "DAIRC inclusion analysis - refactored using claude"
+output: html_document
+date: "2025-09-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## 1. load required packages
+
+```{r load-packages}
+required_packages <- c(
+  "lme4", "dplyr", "broom", "bayestestR", "ggplot2", "stats", "e1071", "tidyr",
+  "patchwork", "multcomp", "lmerTest", "broom.mixed", "tableone", "flextable",
+  "officer", "readr", "jsonlite", "BayesFactor", "consort"
+)
+
+# Install and load packages with feedback
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    cat("Installing", pkg, "...\n")
+    install.packages(pkg)
+  }
+  library(pkg, character.only = TRUE)
+}
+cat("✓ All packages loaded successfully\n")
+```
+
+
+## 2. configuration and helper functions
+
+```{r config-functions}
+# Configuration constants
+CONFIG <- list(
+  data_path = "/Users/ricard/Desktop/poldrack/projects/head-motion-exclusion/data/df_final_all-refactored.rds",
+  model_control = glmerControl(
+    optimizer = "bobyqa",
+    optCtrl = list(maxfun = 2e5)
+  )
+)
+
+# Helper function to prepare timepoint data (eliminates code duplication)
+prepare_timepoint_data <- function(df, timepoint_name, timepoint_filter) {
+  cat("Preparing", timepoint_name, "data...\n")
+  
+  # Start with filtered data
+  timepoint_data <- df %>% filter(eventname == timepoint_filter)
+  initial_n <- nrow(timepoint_data)
+  cat("Initial", timepoint_name, "records:", initial_n, "\n")
+  
+  if (initial_n == 0) {
+    cat(" No records found for", timepoint_name, "with filter:", timepoint_filter, "\n")
+    return(data.frame())
+  }
+  
+  # Required columns - check what exists to avoid errors
+  required_cols <- c("src_subject_id", "income", "parental_education", "sex", 
+                     "race_ethnicity_label", "rel_family_id", "rsfmri_meanmotion", 
+                     "eventname", "site", "age", "imgincl_rsfmri_include")
+  
+  # Find which columns actually exist
+  existing_cols <- intersect(required_cols, names(timepoint_data))
+  missing_cols <- setdiff(required_cols, names(timepoint_data))
+  
+  if (length(missing_cols) > 0) {
+    cat("⚠️ Missing columns in", timepoint_name, ":", paste(missing_cols, collapse = ", "), "\n")
+  }
+  
+  # Check for completely missing variables BEFORE processing
+  completely_missing_vars <- c()
+  for (col in existing_cols) {
+    if (all(is.na(timepoint_data[[col]]))) {
+      completely_missing_vars <- c(completely_missing_vars, col)
+    }
+  }
+  
+  if (length(completely_missing_vars) > 0) {
+    cat("⚠️ Variables with ALL missing data in", timepoint_name, ":", 
+        paste(completely_missing_vars, collapse = ", "), "\n")
+  }
+  
+  # Select only existing columns and transform
+  processed_data <- timepoint_data %>%
+    dplyr::select(all_of(existing_cols)) %>%
+    mutate(
+      # Convert scale() matrices to numeric vectors (fixes model issues)
+      income_z = if("income" %in% names(.) && !all(is.na(income))) as.numeric(scale(income)) else NA,
+      parent_ed_z = if("parental_education" %in% names(.) && !all(is.na(parental_education))) as.numeric(scale(parental_education)) else NA,
+      age_z = if("age" %in% names(.) && !all(is.na(age))) as.numeric(scale(age)) else NA,
+      
+      # Create clear binary coding
+      female = if("sex" %in% names(.) && !all(is.na(sex))) ifelse(sex == 2, 1, 0) else NA,
+      
+      # Ensure proper factor coding
+      race_ethnicity_label = if("race_ethnicity_label" %in% names(.) && !all(is.na(race_ethnicity_label))) as.factor(race_ethnicity_label) else NA,
+      site = if("site" %in% names(.) && !all(is.na(site))) as.factor(site) else NA
+    )
+  
+  # Report missing data patterns BEFORE drop_na
+  missing_summary <- processed_data %>%
+    summarise(across(everything(), ~sum(is.na(.)))) %>%
+    pivot_longer(everything(), names_to = "variable", values_to = "missing_n") %>%
+    filter(missing_n > 0) %>%
+    arrange(desc(missing_n))
+  
+  if (nrow(missing_summary) > 0) {
+    cat("Missing data patterns in", timepoint_name, ":\n")
+    print(missing_summary)
+    
+    # Check if any variable would eliminate all data
+    vars_eliminating_all <- missing_summary %>%
+      filter(missing_n == nrow(processed_data))
+    
+    if (nrow(vars_eliminating_all) > 0) {
+      cat("⚠️ Variables that would eliminate ALL data:", 
+          paste(vars_eliminating_all$variable, collapse = ", "), "\n")
+    }
+  }
+  
+  # Try more lenient approach - only require subject ID and outcome
+  essential_vars <- c("src_subject_id")
+  if ("imgincl_rsfmri_include" %in% names(processed_data)) {
+    essential_vars <- c(essential_vars, "imgincl_rsfmri_include")
+  }
+  
+  # First try with all variables
+  complete_data <- processed_data %>% drop_na()
+  final_n <- nrow(complete_data)
+  
+  # If that fails, try with just essential variables
+  if (final_n == 0) {
+    cat("⚠️ All data lost with complete case analysis. Trying with essential variables only...\n")
+    
+    complete_data <- processed_data %>%
+      filter(!is.na(src_subject_id)) %>%
+      filter(if("imgincl_rsfmri_include" %in% names(.)) !is.na(imgincl_rsfmri_include) else TRUE)
+    
+    final_n <- nrow(complete_data)
+    cat("With essential variables only:", final_n, "records retained\n")
+  }
+  
+  removed_n <- initial_n - final_n
+  
+  cat("✓", timepoint_name, ":", initial_n, "→", final_n, 
+      "participants (", removed_n, "removed due to missing data)\n\n")
+  
+  return(complete_data)
+}
+
+# Helper function for model diagnostics
+check_model_convergence <- function(model, model_name) {
+  convergence_code <- model@optinfo$conv$opt
+  if (convergence_code != 0) {
+    warning(paste(model_name, "did not converge (code:", convergence_code, ")"))
+    return(FALSE)
+  } else {
+    cat("✓", model_name, "converged successfully\n")
+    return(TRUE)
+  }
+}
+
+# Helper function for model summaries
+create_model_summary <- function(model, model_name) {
+  cat("\n=== ", model_name, " ===\n")
+  cat("AIC:", round(AIC(model), 2), "\n")
+  cat("BIC:", round(BIC(model), 2), "\n")
+  
+  # Fixed effects summary
+  fixed_effects <- broom.mixed::tidy(model, effects = "fixed")
+  cat("\nFixed Effects:\n")
+  print(fixed_effects)
+  
+  return(fixed_effects)
+}
+```
+
+## 3. load and validate data
+
+```{r load-data}
+cat("=== Loading ABCD Data ===\n")
+
+# Validate file exists
+if (!file.exists(CONFIG$data_path)) {
+  stop("Data file not found: ", CONFIG$data_path)
+}
+
+# Load main dataset
+df_final_all <- readRDS(CONFIG$data_path)
+cat("✓ Loaded", nrow(df_final_all), "total records from", ncol(df_final_all), "variables\n")
+
+# Check timepoint availability
+baseline_raw_count <- sum(df_final_all$eventname == "baseline_year_1_arm_1")
+followup_raw_count <- sum(df_final_all$eventname == "2_year_follow_up_y_arm_1")
+
+cat("✓ Raw baseline records:", baseline_raw_count, "\n")
+cat("✓ Raw followup records:", followup_raw_count, "\n")
+```
+
+## 4. data preparation
+
+```{r data-preparation}
+cat("=== Data Preparation ===\n")
+
+# Prepare both timepoints using consistent function (eliminates duplication)
+baseline_data <- prepare_timepoint_data(
+  df_final_all, 
+  "baseline", 
+  "baseline_year_1_arm_1"
+)
+
+followup_data <- prepare_timepoint_data(
+  df_final_all,
+  "followup", 
+  "2_year_follow_up_y_arm_1"
+)
+
+```
+
+## 4.1 data quality summary
+
+```{r data-quality}
+cat("=== Data Quality Summary ===\n")
+
+if (nrow(baseline_data) > 0) {
+  # DAIRC inclusion rates
+  if ("imgincl_rsfmri_include" %in% names(baseline_data)) {
+    inclusion_summary <- baseline_data %>%
+      count(imgincl_rsfmri_include, name = "n") %>%
+      mutate(percentage = round(n / sum(n) * 100, 1))
+    
+    cat("DAIRC Imaging Inclusion Status:\n")
+    print(inclusion_summary)
+  }
+  
+  # Sample characteristics
+  cat("\nBaseline Sample Characteristics (N =", nrow(baseline_data), "):\n")
+  
+  if ("age" %in% names(baseline_data)) {
+    cat("Age: M =", round(mean(baseline_data$age, na.rm = TRUE), 1), 
+        "years, SD =", round(sd(baseline_data$age, na.rm = TRUE), 1), "\n")
+  }
+  
+  if ("female" %in% names(baseline_data)) {
+    cat("Female:", sum(baseline_data$female, na.rm = TRUE), "(", 
+        round(mean(baseline_data$female, na.rm = TRUE) * 100, 1), "%)\n")
+  }
+  
+  if ("site" %in% names(baseline_data)) {
+    cat("Sites:", length(unique(baseline_data$site)), "\n")
+  }
+  
+  if ("race_ethnicity_label" %in% names(baseline_data)) {
+    cat("\nRace/Ethnicity Distribution:\n")
+    print(table(baseline_data$race_ethnicity_label, useNA = "ifany"))
+  }
+} else {
+  cat("⚠️ No baseline data available for quality summary\n")
+}
+```
+
+## 5. DAIRC Inclusion Analysis
+
+### Model 1: Full Model (with race/ethnicity)
+
+>> **First, we fit a generalized linear mixed-effects model predicting the binary DAIRC inclusion variable (imgincl_rsfmri_include) to assess whether the initial quality control criteria had a racially disparate effect (N = 10280). The model included fixed effects for household income, parental education, sex, age, and race/ethnicity, with random intercepts for family ID and site to account for nested data structure. **
+
+
+**Black participants were significantly less likely to be included compared to White participants based upon the DAIRC-criterion, but the Bayes factor supported the null (OR = 0.79, 95% CI [0.66, 0.95], p = 0.012, BF10  = 0.21).**
+
+```{r}
+cat("=== DAIRC Full Model Analysis ===\n")
+
+# Check if we have necessary variables for modeling
+required_model_vars <- c("imgincl_rsfmri_include", "income_z", "parent_ed_z", 
+                        "female", "race_ethnicity_label", "age_z", "rel_family_id", "site")
+
+available_vars <- intersect(required_model_vars, names(baseline_data))
+missing_vars <- setdiff(required_model_vars, names(baseline_data))
+
+if (length(missing_vars) > 0) {
+  cat("⚠️ Missing variables for full model:", paste(missing_vars, collapse = ", "), "\n")
+}
+
+# Only proceed if we have sufficient data and variables
+if (length(available_vars) >= 6 && nrow(baseline_data) > 0) {
+  
+  tryCatch({
+    dairc_full_model <- glmer(
+      imgincl_rsfmri_include ~ income_z + parent_ed_z + female + race_ethnicity_label + age_z +
+        (1 | rel_family_id) + 
+        (1 | site),
+      data = baseline_data,  # Using consistent dataset
+      family = binomial,
+      control = CONFIG$model_control
+    )
+    
+    # Check convergence
+    full_converged <- check_model_convergence(dairc_full_model, "Full Model")
+    
+    if (full_converged) {
+      full_summary <- create_model_summary(dairc_full_model, "Full Model (with race/ethnicity)")
+    } else {
+      cat("⚠️ Full model failed to converge\n")
+    }
+    
+  }, error = function(e) {
+    cat("⚠️ Full model failed with error:", e$message, "\n")
+    full_converged <- FALSE
+  })
+  
+} else {
+  cat("⚠️ Insufficient data or variables for full model\n")
+  full_converged <- FALSE
+}
+
+summary(dairc_full_model)
+
+```
+### Model 2: Reduced Model (without race/ethnicity)
+
+```{r dairc-reduced-model}
+cat("=== DAIRC Reduced Model Analysis ===\n")
+
+# Check variables for reduced model
+reduced_model_vars <- c("imgincl_rsfmri_include", "income_z", "parent_ed_z", 
+                       "female", "age_z", "rel_family_id", "site")
+
+if (all(reduced_model_vars %in% names(baseline_data)) && nrow(baseline_data) > 0) {
+  
+  tryCatch({
+    dairc_reduced_model <- glmer(
+      imgincl_rsfmri_include ~ income_z + parent_ed_z + female + age_z +
+        (1 | rel_family_id) + 
+        (1 | site),
+      data = baseline_data,  # Using same dataset as full model
+      family = binomial,
+      control = CONFIG$model_control
+    )
+    
+    # Check convergence
+    reduced_converged <- check_model_convergence(dairc_reduced_model, "Reduced Model")
+    
+    if (reduced_converged) {
+      reduced_summary <- create_model_summary(dairc_reduced_model, "Reduced Model (without race/ethnicity)")
+    } else {
+      cat("⚠️ Reduced model failed to converge\n")
+    }
+    
+  }, error = function(e) {
+    cat("⚠️ Reduced model failed with error:", e$message, "\n")
+    reduced_converged <- FALSE
+  })
+  
+} else {
+  cat("⚠️ Insufficient data or variables for reduced model\n")
+  reduced_converged <- FALSE
+}
+
+summary(dairc_reduced_model)
+```
+## 6. Model Comparison
+
+### Likelihood Ratio Test
+
+>> **However, a likelihood ratio test comparing the full model to a reduced model without the race/ethnicity term was not statistically significant (χ²(4) = 8.76, p = .07, BF10 = 7.54e-07), with the Bayes factor providing strong evidence that the race/ethnicity variable did not improve model fit. Given that the DAIRC exclusion criteria do not have a racially divergent impact, the subsequent analyses used the DAIRC-included sample as used by Cosgrove et al., 2022.**
+
+```{r model-comparison-lrt}
+cat("=== Model Comparison: Likelihood Ratio Test ===\n")
+
+# Only compare if both models exist and converged
+if (exists("full_converged") && exists("reduced_converged") && 
+    full_converged && reduced_converged) {
+  
+  cat("Likelihood Ratio Test:\n")
+  lrt_results <- anova(dairc_full_model, dairc_reduced_model)
+  print(lrt_results)
+  
+  # Extract and interpret results
+  p_value <- lrt_results$`Pr(>Chisq)`[2]
+  cat("\nInterpretation: Race/ethnicity", 
+      ifelse(p_value < 0.05, "SIGNIFICANTLY improves", "does NOT significantly improve"), 
+      "model fit (p =", round(p_value, 4), ")\n")
+  
+} else {
+  cat("⚠️ Cannot perform LRT due to model convergence issues\n")
+  if (exists("full_converged")) cat("Full model converged:", full_converged, "\n")
+  if (exists("reduced_converged")) cat("Reduced model converged:", reduced_converged, "\n")
+}
+```
+
+### 7. Bayesian Model Comparison for individual race predictors
+
+```{r bayesian-comparison}
+
+library(forcats)
+
+race_levels <- levels(baseline_data$race_ethnicity_label)
+race_levels <- race_levels[race_levels != "White"]  # exclude White since it's the reference
+
+bf_results <- numeric(length(race_levels))
+names(bf_results) <- race_levels
+
+for (race in race_levels) {
+  
+  # create new factor variable that equates to omitting 
+  # the dummy for the specified level `race`
+  
+  baseline_data$race_new_baseline = baseline_data$race_ethnicity_label
+  baseline_data$race_new_baseline <- fct_collapse(
+      baseline_data$race_new_baseline,
+      White_TestedRace = c("White", race)
+      )
+  # Ensure the baseline is White_TestedRace
+  baseline_data$race_new_baseline <- fct_relevel(
+      baseline_data$race_new_baseline,
+    "White_TestedRace"
+    )
+  
+  # Fit reduced model without the race category separated from White
+  model_reduced <- glmer( 
+    imgincl_rsfmri_include ~ income_z + parent_ed_z +
+      race_new_baseline + female + age_z + (1 | rel_family_id) + (1 | site),
+    data = baseline_data,
+    family = binomial,
+    control = CONFIG$model_control
+  )
+  
+  
+  # Compute Bayes factor comparing full model to reduced model
+ bf_out <- bayesfactor_models(dairc_full_model, model_reduced,
+                             denominator = model_reduced)
+  
+  # Extract BF (exponentiate log_BF)
+  bf_val <- exp(bf_out$log_BF[1])
+  bf_results[race] <- bf_val
+}
+
+bf_results
+
+```
+
+## Calculate Bayes factors for everywhere there is a pvalue. 
+
+```{r}
+
+#' Calculate Bayes Factors for individual predictors in a mixed model.
+#'
+#' This function compares a full model to several reduced models, 
+#' each with one predictor removed, to calculate the Bayes Factor (BF10) 
+#' for the inclusion of that predictor.
+#'
+#' @param full_formula The formula for the full model.
+#' @param predictors_to_test A character vector of predictor names to test.
+#' @param data The dataframe containing the data.
+#' @param ... Additional arguments to be passed to the glmer function 
+#'            (e.g., family, control).
+#'
+#' @return A named list where each element is a 'bayesfactor_models' object 
+#'         for the corresponding tested predictor.
+#'
+calculate_bf_for_predictors <- function(full_formula, predictors_to_test, data, ...) {
+  
+  # --- 1. Fit the full model (only once) ---
+  message("Fitting the full model...")
+  full_model <- glmer(full_formula, data = data, ...)
+  
+  # --- 2. Loop through each predictor to test ---
+  # 'lapply' will create a list of results for us.
+  results_list <- lapply(predictors_to_test, function(predictor) {
+    
+    message(paste("Calculating BF for:", predictor))
+    
+    # --- 3. Create the formula for the reduced model ---
+    # The update() function is perfect for programmatically removing a term.
+    # The formula `~ . - predictor` means "keep everything the same, but remove this predictor".
+    reduced_formula <- update(full_formula, as.formula(paste("~ . -", predictor)))
+    
+    # --- 4. Fit the reduced model ---
+    reduced_model <- glmer(reduced_formula, data = data, ...)
+    
+    # --- 5. Calculate the Bayes Factor ---
+    # The full model is the numerator, the reduced model is the denominator.
+    bf <- bayesfactor_models(
+      full_model,
+      reduced_model,
+      denominator = reduced_model
+    )
+    
+    return(bf)
+  })
+  
+  # --- 6. Name the list elements for easy access ---
+  names(results_list) <- predictors_to_test
+  
+  return(results_list)
+}
+
+
+# --- 1. Define the full model formula ---
+
+dairc_formula <- formula(imgincl_rsfmri_include ~ 
+                                   income_z + parent_ed_z + 
+                                   female + race_ethnicity_label + 
+                                   age_z +
+                                   (1 | rel_family_id) + (1 | site)
+                                 )
+
+
+# --- 2. Define the list of predictors you want to test ---
+predictors <- c("income_z", "parent_ed_z", "female", "age_z")
+
+# --- 3. Run the function! ---
+all_bfs <- calculate_bf_for_predictors(
+  full_formula = dairc_formula,
+  predictors_to_test = predictors,
+  data = baseline_data,
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# --- 4. View the results for dairc models (Table s1 and s2) BF10 ---
+
+# Get the BF10 for income
+all_bfs$income_z
+
+# Get the BF10 for parental education 
+all_bfs$parent_ed_z
+
+# Get the BF10 for sex (female)
+all_bfs$female
+
+# Get the BF10 for age 
+all_bfs$age_z
+
+
+
+
+```
+
+# Calculate BFs for reduced dairc model: 
+
+```{r}
+
+#' Calculate Bayes Factors for individual predictors in a REDUCED mixed model. 
+#'
+#' This function compares a full model to several reduced models, 
+#' each with one predictor removed, to calculate the Bayes Factor (BF10) 
+#' for the inclusion of that predictor.
+
+
+
+calculate_bf_for_predictors <- function(full_formula, predictors_to_test, data, ...) {
+  
+  # --- 1. Fit the full model (only once) ---
+  message("Fitting the full model...")
+  full_model <- glmer(full_formula, data = data, ...)
+  
+  # --- 2. Loop through each predictor to test ---
+  # 'lapply' will create a list of results for us.
+  results_list <- lapply(predictors_to_test, function(predictor) {
+    
+    message(paste("Calculating BF for:", predictor))
+    
+    # --- 3. Create the formula for the reduced model ---
+    # The update() function is perfect for programmatically removing a term.
+    # The formula `~ . - predictor` means "keep everything the same, but remove this predictor".
+    reduced_formula <- update(full_formula, as.formula(paste("~ . -", predictor)))
+    
+    # --- 4. Fit the reduced model ---
+    reduced_model <- glmer(reduced_formula, data = data, ...)
+    
+    # --- 5. Calculate the Bayes Factor ---
+    # The full model is the numerator, the reduced model is the denominator.
+    bf <- bayesfactor_models(
+      full_model,
+      reduced_model,
+      denominator = reduced_model
+    )
+    
+    return(bf)
+  })
+  
+  # --- 6. Name the list elements for easy access ---
+  names(results_list) <- predictors_to_test
+  
+  return(results_list)
+}
+
+# --- 1. Define the reduced model formula --- # no race_ethnicity in this reduced model
+
+dairc_formula_reduce <- formula(imgincl_rsfmri_include ~ 
+                                   income_z + parent_ed_z + 
+                                   female + age_z +
+                                   (1 | rel_family_id) + (1 | site)
+                                 )
+
+# --- 2. Define the list of predictors you want to test ---
+predictors <- c("income_z", "parent_ed_z", "female", "age_z", "eventname")
+
+# --- 3. Run the function! ---
+all_bfs <- calculate_bf_for_predictors(
+  full_formula = dairc_formula_reduce,
+  predictors_to_test = predictors,
+  data = baseline_data,
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# --- 4. View the results for dairc models (Table 1) BF10 ---
+
+# Get the BF10 for income
+all_bfs$income_z
+
+# Get the BF10 for parental education 
+all_bfs$parent_ed_z
+
+# Get the BF10 for sex (female)
+all_bfs$female
+
+# Get the BF10 for age 
+all_bfs$age_z
+
+```
+## 9. Results Summary
+
+```{r results-summary}
+cat("=== Final Results Summary ===\n")
+
+if (nrow(baseline_data) > 0) {
+  # Sample size and inclusion rate
+  total_n <- nrow(baseline_data)
+  
+  if ("imgincl_rsfmri_include" %in% names(baseline_data)) {
+    included_n <- sum(baseline_data$imgincl_rsfmri_include == 1, na.rm = TRUE)
+    inclusion_rate <- round(included_n / total_n * 100, 1)
+    cat("Final sample size:", total_n, "participants\n")
+    cat("participants with DAIRC inclusion = 1:", inclusion_rate, "% (", included_n, "/", total_n, ")\n")
+  }
+  
+  # Statistical results (if available)
+  if (exists("p_value") && !is.na(p_value)) {
+    cat("\nStatistical Results:\n")
+    cat("LRT p-value:", round(p_value, 4), "\n")
+    cat("Race/ethnicity effect:", ifelse(p_value < 0.05, "Significant", "Non-significant"), "\n")
+  }
+  
+  
+} else {
+  cat(" No data available for final summary\n")
+}
+
+cat("\n=== Analysis Complete ===\n")
+```
+

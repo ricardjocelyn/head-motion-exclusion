@@ -1,0 +1,706 @@
+---
+title: "Head motion and sociodemographics as independent correlates of retention:"
+output: html_document
+date: "2025-09-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. load required packages
+
+```{r load-packages}
+# Load required packages with error handling
+required_packages <- c(
+  "lme4", "dplyr", "broom", "bayestestR", "ggplot2", "stats", "e1071", "tidyr",
+  "patchwork", "multcomp", "lmerTest", "broom.mixed", "tableone", "flextable",
+  "officer", "readr", "jsonlite", "BayesFactor", "MuMIn", "brms", "consort", "ggplotify",
+  "officer", "readr", "jsonlite", "BayesFactor", "MuMIn", "brms", "ggplotify",
+  "ggeffects", "performance", "forcats"
+)
+
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    cat("Installing", pkg, "...\n")
+    install.packages(pkg)
+  }
+  library(pkg, character.only = TRUE)
+}
+
+cat("✓ All packages loaded successfully\n")
+```
+
+## 2. configuration constriants
+
+```{r config}
+# Configuration constants
+CONFIG <- list(
+  motion_threshold = 0.2,
+  na_codes = c("777", "888", "999"),
+  na_numeric = c(777, 888, 999), # 777 refuse to answer 888 decline to answer/question not asked 999 dont know
+  data_dir = "/Users/ricard/Desktop/poldrack/projects/head-motion-exclusion/data",
+  output_dir = "/Users/ricard/Desktop/poldrack/projects/head-motion-exclusion/outputs",
+  data_path = "/Users/ricard/Desktop/poldrack/projects/head-motion-exclusion/data/df_final_included-refactored.rds",
+  model_control = glmerControl(
+    optimizer = "bobyqa",
+    optCtrl = list(maxfun = 2e5)
+  )
+)
+
+# Create output directory if needed
+if (!dir.exists(CONFIG$output_dir)) {
+  dir.create(CONFIG$output_dir, recursive = TRUE)
+}
+
+# Helper function to read ABCD CSV files
+read_abcd_csv <- function(path, ...) {
+  if (!file.exists(path)) {
+    stop("File not found: ", path)
+  }
+  read_csv(path, na = CONFIG$na_codes, show_col_types = FALSE, ...)
+}
+```
+
+## 3. prepare helper functions: 
+
+```{r helper-functions}
+# Helper function to prepare timepoint data (eliminates code duplication)
+prepare_timepoint_data <- function(df, timepoint_name, timepoint_filter) {
+  cat("Preparing", timepoint_name, "data...\n")
+  
+  initial_data <- df %>% filter(eventname == timepoint_filter)
+  initial_n <- nrow(initial_data)
+  
+  # Check if 'exclude' column exists, if not use 'exclude_motion'
+  exclude_col <- if("exclude" %in% names(initial_data)) "exclude" else "exclude_motion"
+  
+  processed_data <- initial_data %>%
+    dplyr::select(src_subject_id, income, parental_education, sex, race_ethnicity_label, 
+                  all_of(exclude_col), rel_family_id, rsfmri_meanmotion, eventname, 
+                  site, age, imgincl_rsfmri_include) %>%
+    rename(exclude = all_of(exclude_col)) %>%
+    mutate(
+      # Convert scale() matrices to numeric vectors (fixes model issues)
+      income_z = as.numeric(scale(income)),
+      parent_ed_z = as.numeric(scale(parental_education)),
+      age_z = as.numeric(scale(age)),
+      
+      # Create clear binary coding
+      female = ifelse(sex == 2, 1, 0),
+      
+      # Ensure proper factor coding
+      race_ethnicity_label = as.factor(race_ethnicity_label),
+      site = as.factor(site)
+    )
+  
+  # Remove missing data with reporting
+  complete_data <- processed_data %>% drop_na()
+  final_n <- nrow(complete_data)
+  removed_n <- initial_n - final_n
+  
+  cat("✓", timepoint_name, ":", initial_n, "→", final_n, 
+      "participants (", removed_n, "removed due to missing data)\n")
+  
+  return(complete_data)
+}
+
+# Helper function to check model convergence
+check_model_convergence <- function(model, model_name) {
+  convergence_code <- model@optinfo$conv$opt
+  if (convergence_code != 0) {
+    warning(paste(model_name, "did not converge (code:", convergence_code, ")"))
+    return(FALSE)
+  } else {
+    cat("✓", model_name, "converged successfully\n")
+    return(TRUE)
+  }
+}
+
+# Helper function to perform model comparison
+perform_model_comparison <- function(full_model, reduced_model, comparison_name) {
+  cat("\n=== ", comparison_name, " ===\n")
+  
+  # Likelihood ratio test
+  lrt_results <- anova(full_model, reduced_model)
+  print(lrt_results)
+  
+  # Extract results
+  chi_sq <- lrt_results$Chisq[2]
+  df_diff <- lrt_results$Df[2]
+  p_value <- lrt_results$`Pr(>Chisq)`[2]
+  
+  cat("\nLRT Results:\n")
+  cat("χ²(", df_diff, ") = ", round(chi_sq, 2), ", p = ", round(p_value, 4), "\n", sep = "")
+  
+  # Bayesian comparison
+  tryCatch({
+    bf_results <- bayesfactor_models(full_model, reduced_model)
+    bf_value <- as.numeric(bf_results$BF[1])
+    cat("Bayes Factor: BF₁₀ = ", round(bf_value, 2), "\n", sep = "")
+    
+    return(list(p_value = p_value, bf_value = bf_value, chi_sq = chi_sq, df = df_diff))
+  }, error = function(e) {
+    cat("⚠️ Bayesian comparison failed:", e$message, "\n")
+    return(list(p_value = p_value, chi_sq = chi_sq, df = df_diff))
+  })
+}
+
+# Helper function to create odds ratio data for plotting
+extract_odds_ratios <- function(model, model_name) {
+  tryCatch({
+    or_data <- broom.mixed::tidy(model, effects = "fixed", conf.int = TRUE, exponentiate = TRUE) %>%
+      filter(grepl("race_ethnicity_label", term)) %>%
+      mutate(
+        race_ethnicity_label = gsub("race_ethnicity_label", "", term),
+        model = model_name
+      )
+    
+    # Select only the columns we need
+    or_data <- or_data %>%
+      dplyr::select(race_ethnicity_label, estimate, conf.low, conf.high, model)
+    
+    return(or_data)
+  }, error = function(e) {
+    cat("⚠️ Failed to extract odds ratios for", model_name, ":", e$message, "\n")
+    return(data.frame())
+  })
+}
+```
+
+## 4. data loading and preparation
+
+```{r data-loading}
+cat("=== Loading ABCD Data ===\n")
+
+# Validate file exists
+if (!file.exists(CONFIG$data_path)) {
+  stop("Data file not found: ", CONFIG$data_path)
+}
+
+# Load main dataset
+df_final_included <- readRDS(CONFIG$data_path)
+cat("✓ Loaded", nrow(df_final_included), "total records\n")
+
+# Prepare both timepoints using consistent function
+baseline_data <- prepare_timepoint_data(
+  df_final_included, 
+  "baseline", 
+  "baseline_year_1_arm_1"
+)
+
+followup_data <- prepare_timepoint_data(
+  df_final_included,
+  "followup", 
+  "2_year_follow_up_y_arm_1"
+)
+
+# Create longitudinal dataset
+common_subject_ids <- intersect(baseline_data$src_subject_id, followup_data$src_subject_id)
+cat("✓", length(common_subject_ids), "subjects have both timepoints\n")
+
+longitudinal_data <- bind_rows(
+  baseline_data %>% 
+    filter(src_subject_id %in% common_subject_ids) %>% 
+    mutate(timepoint = "baseline"),
+  followup_data %>% 
+    filter(src_subject_id %in% common_subject_ids) %>% 
+    mutate(timepoint = "followup")
+)
+
+# Add follow-up indicator to baseline data
+baseline_data <- baseline_data %>%
+  mutate(has_followup_data = src_subject_id %in% followup_data$src_subject_id)
+
+cat("✓ Created longitudinal dataset:", nrow(longitudinal_data), "observations\n")
+cat("✓", sum(baseline_data$has_followup_data), "baseline subjects have followup\n")
+```
+
+## 5. retention models:
+
+>> **We first examined the association between head motion and retention, adjusting for socioeconomic and demographic covariates. Starting with the most complex model, we tested the interaction between head motion and race, controlling for income, parental education, gender, and age (Supplemental Table S5). The interaction was not statistically significant (χ²(4) = 6.55, p = .16), and  none of the individual interaction terms (of mean motion with each race category) had a significant p-value. Further, the Bayes factor strongly supported excluding the interaction (BF10 = 3.61e-07).**
+
+```{r attrition-analysis}
+cat("=== retention analysis ===\n")
+
+# function that wants "has_followup_data" to be coded as 1/0, so I'm changing that here
+baseline_data$has_followup_data <- as.numeric(baseline_data$has_followup_data)
+
+# Test interaction between motion and race/ethnicity
+cat("\n=== motion × race/ethnicity interaction test ===\n")
+
+# Additive model
+additive_model <- glmer(
+  has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion + race_ethnicity_label + female + age_z +
+    (1 | rel_family_id) + 
+    (1 | site),
+  data = baseline_data, 
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# Interaction model
+interaction_model <- glmer(
+  has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion * race_ethnicity_label + female + age_z +
+    (1 | rel_family_id) + 
+    (1 | site),
+  data = baseline_data, 
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# compare models
+interaction_comparison <- anova(additive_model, interaction_model, test = "F")
+print(interaction_comparison)
+
+# get bayes factor - bayesian comparison
+tryCatch({
+  bf_interaction <- bayesfactor_models(additive_model,interaction_model)
+  print(bf_interaction)
+}, error = function(e) {
+  cat("⚠️ Interaction Bayesian comparison failed:", e$message, "\n")
+})
+
+
+# Full retention model with race/ethnicity
+attrition_full_model <- glmer(
+  has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion + race_ethnicity_label + female + age_z +
+    (1 | rel_family_id) + 
+    (1 | site),
+  data = baseline_data, 
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# Reduced retention model without race/ethnicity
+attrition_reduced_model <- glmer(
+  has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion + female + age_z +
+    (1 | rel_family_id) +
+    (1 | site),
+  data = baseline_data, 
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# Check convergence
+attrition_full_converged <- check_model_convergence(attrition_full_model, "retention full model")
+attrition_reduced_converged <- check_model_convergence(attrition_reduced_model, "retention reduced model")
+
+# Model comparison with BF output
+if (attrition_full_converged && attrition_reduced_converged) {
+  attrition_results <- perform_model_comparison(
+    attrition_full_model, 
+    attrition_reduced_model,
+    "retention model comparison"
+  )
+  
+  # R-squared values
+  cat("\nModel R-squared values:\n")
+  r2_reduced <- MuMIn::r.squaredGLMM(attrition_reduced_model)
+  r2_full <- MuMIn::r.squaredGLMM(attrition_full_model)
+  
+  cat("Reduced model R²:", round(r2_reduced[1], 3), "(marginal),", round(r2_reduced[2], 3), "(conditional)\n")
+  cat("Full model R²:", round(r2_full[1], 3), "(marginal),", round(r2_full[2], 3), "(conditional)\n")
+} else {
+  cat("⚠️ Cannot perform retention model comparison due to convergence issues\n")
+}
+
+```
+
+## retention full model summary 
+```{r}
+summary(attrition_full_model)
+```
+
+## retention full model summary 
+```{r}
+summary(attrition_reduced_model)
+```
+
+
+## 6. bayes factors for retention models
+
+# return bayes factor for individual race predictors 
+
+```{r}
+race_levels <- levels(baseline_data$race_ethnicity_label)
+race_levels <- race_levels[race_levels != "White"]  # exclude White since it's the reference
+
+bf_results <- numeric(length(race_levels))
+names(bf_results) <- race_levels
+
+for (race in race_levels) {
+  
+  # create new factor variable that equates to omitting 
+  # the dummy for the specified level `race`
+  baseline_data$race_new_baseline = baseline_data$race_ethnicity_label
+  baseline_data$race_new_baseline <- fct_collapse(
+      baseline_data$race_new_baseline,
+      White_TestedRace = c("White", race)
+      )
+  # Ensure the baseline is White_TestedRace
+  baseline_data$race_new_baseline <- fct_relevel(
+      baseline_data$race_new_baseline,
+    "White_TestedRace"
+    )
+  
+  # Fit reduced model without the race category separated from White
+  model_reduced <- glmer(
+    has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion +
+      race_new_baseline + female + age_z + (1 | rel_family_id) + (1 | site),
+    data = baseline_data,
+    family = binomial,
+    control = CONFIG$model_control
+  )
+  
+  # Compute Bayes factor comparing full model to reduced model
+ bf_out <- bayesfactor_models(attrition_full_model, model_reduced,
+                             denominator = model_reduced)
+  
+  # Extract BF (exponentiate log_BF)
+  bf_val <- exp(bf_out$log_BF[1])
+  bf_results[race] <- bf_val
+}
+
+bf_results
+```
+
+```{r}
+# BIC-BF for full vs reduced model
+bf_race = bayesfactor_models(
+  attrition_full_model, attrition_reduced_model,
+  denominator = attrition_reduced_model
+   )
+
+# Careful!  This is choosing the first model entered vs denom.
+ bf_race_val = exp(bf_race$log_BF[1])
+ sprintf("BIC-BF for model with race vs without race: %.2f", bf_race_val)
+```
+
+# BIC-BF for income, parent education, motion, sex female, and age attrition models - full and reduced)
+# Full model:
+
+```{r}
+
+#' Calculate Bayes Factors for individual predictors in a mixed model.
+#'
+#' This function compares a full model to several reduced models, 
+#' each with one predictor removed, to calculate the Bayes Factor (BF10) 
+#' for the inclusion of that predictor.
+#'
+#' @param full_formula The formula for the full model.
+#' @param predictors_to_test A character vector of predictor names to test.
+#' @param data The dataframe containing the data.
+#' @param ... Additional arguments to be passed to the glmer function 
+#'            (e.g., family, control).
+#'
+#' @return A named list where each element is a 'bayesfactor_models' object 
+#'         for the corresponding tested predictor.
+#'
+calculate_bf_for_predictors <- function(full_formula, predictors_to_test, data, ...) {
+  
+  # --- 1. Fit the full model (only once) ---
+  message("Fitting the full model...")
+  full_model <- glmer(full_formula, data = data, ...)
+  
+  # --- 2. Loop through each predictor to test ---
+  # 'lapply' will create a list of results for us.
+  results_list <- lapply(predictors_to_test, function(predictor) {
+    
+    message(paste("Calculating BF for:", predictor))
+    
+    # --- 3. Create the formula for the reduced model ---
+    # The update() function is perfect for programmatically removing a term.
+    # The formula `~ . - predictor` means "keep everything the same, but remove this predictor".
+    reduced_formula <- update(full_formula, as.formula(paste("~ . -", predictor)))
+    
+    # --- 4. Fit the reduced model ---
+    reduced_model <- glmer(reduced_formula, data = data, ...)
+    
+    # --- 5. Calculate the Bayes Factor ---
+    # The full model is the numerator, the reduced model is the denominator.
+    bf <- bayesfactor_models(
+      full_model,
+      reduced_model,
+      denominator = reduced_model
+    )
+    
+    return(bf)
+  })
+  
+  # --- 6. Name the list elements for easy access ---
+  names(results_list) <- predictors_to_test
+  
+  return(results_list)
+}
+
+# --- 1. Define the full model formula ---
+attrition_formula <- formula(
+  has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion + 
+                      race_ethnicity_label + female + age_z +
+                      (1 | rel_family_id) + (1 | site)
+)
+
+# --- 2. Define the list of predictors you want to test ---
+predictors <- c("income_z", "parent_ed_z", "rsfmri_meanmotion", "female", "age_z")
+
+# --- 3. Run the function! ---
+all_bfs <- calculate_bf_for_predictors(
+  full_formula = attrition_formula,
+  predictors_to_test = predictors,
+  data = baseline_data,
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+
+# --- 4. View the results for retention full model (Table 1) BF10 ---
+
+# Get the BF10 for income
+all_bfs$income_z
+
+# Get the BF10 for parental education 
+all_bfs$parent_ed_z
+
+# Get the BF10 for motion 
+all_bfs$rsfmri_meanmotion
+
+# Get the BF10 for sex (female)
+all_bfs$female
+
+# Get the BF10 for age 
+all_bfs$age_z
+
+```
+
+# Reduced model: 
+
+```{r}
+
+#' Calculate Bayes Factors for individual predictors in a REDUCED mixed model. 
+#'
+#' This function compares a full model to several reduced models, 
+#' each with one predictor removed, to calculate the Bayes Factor (BF10) 
+#' for the inclusion of that predictor.
+#'
+#' @param full_formula The formula for the full model.
+#' @param predictors_to_test A character vector of predictor names to test.
+#' @param data The dataframe containing the data.
+#' @param ... Additional arguments to be passed to the glmer function 
+#'            (e.g., family, control).
+#'
+#' @return A named list where each element is a 'bayesfactor_models' object 
+#'         for the corresponding tested predictor.
+#'
+
+
+calculate_bf_for_predictors <- function(full_formula, predictors_to_test, data, ...) {
+  
+  # --- 1. Fit the full model (only once) ---
+  message("Fitting the full model...")
+  full_model <- glmer(full_formula, data = data, ...)
+  
+  # --- 2. Loop through each predictor to test ---
+  # 'lapply' will create a list of results for us.
+  results_list <- lapply(predictors_to_test, function(predictor) {
+    
+    message(paste("Calculating BF for:", predictor))
+    
+    # --- 3. Create the formula for the reduced model ---
+    # The update() function is perfect for programmatically removing a term.
+    # The formula `~ . - predictor` means "keep everything the same, but remove this predictor".
+    reduced_formula <- update(full_formula, as.formula(paste("~ . -", predictor)))
+    
+    # --- 4. Fit the reduced model ---
+    reduced_model <- glmer(reduced_formula, data = data, ...)
+    
+    # --- 5. Calculate the Bayes Factor ---
+    # The full model is the numerator, the reduced model is the denominator.
+    bf <- bayesfactor_models(
+      full_model,
+      reduced_model,
+      denominator = reduced_model
+    )
+    
+    return(bf)
+  })
+  
+  # --- 6. Name the list elements for easy access ---
+  names(results_list) <- predictors_to_test
+  
+  return(results_list)
+}
+
+# --- 1. Define the reduced model formula ---
+attrition_formula <- formula(
+  has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion + 
+                      female + age_z +
+                      (1 | rel_family_id) + (1 | site)
+)
+
+# --- 2. Define the list of predictors you want to test ---
+predictors <- c("income_z", "parent_ed_z", "rsfmri_meanmotion", "female", "age_z")
+
+# --- 3. Run the function! ---
+all_bfs <- calculate_bf_for_predictors(
+  full_formula = attrition_formula,
+  predictors_to_test = predictors,
+  data = baseline_data,
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# --- 4. View the results for retention reduced models (Table 1) BF10 ---
+
+# Get the BF10 for income
+all_bfs$income_z
+
+# Get the BF10 for parental education 
+all_bfs$parent_ed_z
+
+# Get the BF10 for motion 
+all_bfs$rsfmri_meanmotion
+
+# Get the BF10 for sex (female)
+all_bfs$female
+
+# Get the BF10 for age 
+all_bfs$age_z
+```
+
+## 7. return odds ratios for full and reduced models 
+
+```{r}
+extract_OR_table <- function(model) {
+  # tidy output with confint
+  tidy_mod <- broom.mixed::tidy(model, effects = "fixed", conf.int = TRUE, conf.level = 0.95)
+  
+  # compute OR and CIs
+  tidy_mod <- tidy_mod %>%
+    mutate(
+      OR = exp(estimate),
+      OR_low = exp(conf.low),
+      OR_high = exp(conf.high),
+      p_value = p.value
+    ) %>%
+    dplyr::select(term, OR, OR_low, OR_high, p_value)
+  
+  # remove intercept if you want
+  tidy_mod <- tidy_mod %>% filter(term != "(Intercept)")
+  
+  return(tidy_mod)
+}
+
+# Extract tables
+tbl_full <- extract_OR_table(attrition_full_model)
+tbl_reduced <- extract_OR_table(attrition_reduced_model)
+
+print(tbl_full) # full retention model (table 1)
+print(tbl_reduced) # reduced retention model (table 1)
+```
+
+## 8. calculate predicted probabilites by race/ethnicity to plot: 
+
+```{r}
+# Get predicted probabilities by race/ethnicity
+preds_race <- ggpredict(attrition_full_model, terms = "race_ethnicity_label")
+print(preds_race)
+```
+```{r}
+# motion
+preds_motion <- ggpredict(attrition_full_model, 
+                   terms = "rsfmri_meanmotion [0:0.9 by=0.1]")
+
+# View the predicted values
+print(preds_motion)
+```
+
+## 9. plot the predicted probabilites:
+
+```{r fig.height=6, fig.width=8}
+
+# Use the same y-axis scale for both plots
+y_limits <- c(0.4, 0.6)
+y_breaks <- seq(0.4, 0.6, by = 0.05)
+
+# Enhanced plot for race predictions (showing retention rate - higher is better)
+p1 <- ggplot(preds_race, aes(x = x, y = predicted)) +
+  geom_point(size = 4, color = "darkgreen") +
+  geom_text(aes(label = sprintf("%.2f", predicted)),
+            vjust = -1.2, size = 5, color = "black") +
+  scale_y_continuous(limits = y_limits, breaks = y_breaks) +
+  labs(
+    x = "Race/Ethnicity",
+    y = "Predicted Probability of\n Retention (2yr follow-up)",
+    title = ""
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "grey90", size = 0.5),
+    panel.grid.minor = element_blank()
+  )
+
+# Enhanced plot for motion predictions  
+p2 <- ggplot(preds_motion, aes(x = x, y = predicted)) +
+  geom_line(linewidth = 1.5, color = "darkgreen") +
+  geom_point(size = 3, color = "darkgreen") +
+  scale_x_continuous(breaks = pretty(preds_motion$x, n = 6)) +
+  scale_y_continuous(limits = y_limits, breaks = y_breaks) +
+  labs(
+    x = "Mean Motion (rsfMRI)",
+    y = "Predicted Probability of\n Retention (2yr follow-up)",  # Remove the y-axis title here
+    title = ""
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "grey90", size = 0.5),
+    panel.grid.minor = element_blank()
+  )
+
+# Combine vertically with better spacing
+combined_plot <- p1 / p2 + plot_layout(heights = c(1, 1))
+
+# Display the plot
+print(combined_plot)
+
+# Save as SVG
+ggsave(
+  filename = "prediction_plots.svg",
+  plot = combined_plot,
+  path = CONFIG$output_dir,
+  width = 10,
+  height = 6,
+  units = "in"
+)
+
+```
+
+## 10. Results Summary
+
+```{r results-summary}
+cat("=== Final Results Summary ===\n\n")
+
+# Sample sizes
+cat("Sample Sizes:\n")
+cat("Baseline:", nrow(baseline_data), "participants\n")
+cat("Follow-up:", nrow(followup_data), "participants\n") 
+cat("Longitudinal:", length(common_subject_ids), "subjects with both timepoints (", nrow(longitudinal_data), "observations)\n")
+
+
+cat("\n=== Analysis Complete ===\n")
+```
+
+## 11. session info: 
+
+```{r session-info}
+sessionInfo()
+```
+

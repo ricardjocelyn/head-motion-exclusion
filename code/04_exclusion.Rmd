@@ -1,0 +1,805 @@
+---
+title: "04 exclusion analyses - refactored using claude"
+output: html_document
+date: "2025-09-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load required packages:
+
+```{r}
+required_packages <- c(
+  "lme4", "dplyr", "broom", "bayestestR", "ggplot2", "stats", "e1071", "tidyr",
+  "patchwork", "multcomp", "lmerTest", "broom.mixed", "tableone", "flextable",
+<<<<<<< HEAD
+  "officer", "readr", "jsonlite", "BayesFactor", "MuMIn", "brms", "cmdstanr"
+=======
+  "officer", "readr", "jsonlite", "BayesFactor", "MuMIn", "brms", "cmdstanr", "consort"
+>>>>>>> cbdf9d8 (update code)
+)
+
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    cat("Installing", pkg, "...\n")
+    install.packages(pkg)
+  }
+  library(pkg, character.only = TRUE)
+}
+
+cat("✓ All packages loaded successfully\n")
+```
+
+## configuration for data and output directories: 
+
+```{r}
+# Configuration constants
+CONFIG <- list(
+  motion_threshold = 0.2,
+  na_codes = c("777", "888", "999"),
+  na_numeric = c(777, 888, 999), # 777 refuse to answer 888 decline to answer/question not asked 999 dont know
+  data_dir = "/Users/ricard/Desktop/poldrack/abcd/data/abcd-data-release-5/core/",
+<<<<<<< HEAD
+=======
+  dairc_data <- readRDS("/Users/ricard/Desktop/poldrack/projects/head-motion-exclusion/data/df_final_all-refactored.rds"),
+>>>>>>> cbdf9d8 (update code)
+  output_dir = "/Users/ricard/Desktop/poldrack/projects/head-motion-exclusion/outputs",
+  data_path = "/Users/ricard/Desktop/poldrack/projects/head-motion-exclusion/data/df_final_included-refactored.rds",
+  model_control = glmerControl(
+    optimizer = "bobyqa",
+    optCtrl = list(maxfun = 2e5)
+  )
+)
+
+# Create output directory if needed
+if (!dir.exists(CONFIG$output_dir)) {
+  dir.create(CONFIG$output_dir, recursive = TRUE)
+}
+
+# Helper function to read ABCD CSV files
+read_abcd_csv <- function(path, ...) {
+  if (!file.exists(path)) {
+    stop("File not found: ", path)
+  }
+  read_csv(path, na = CONFIG$na_codes, show_col_types = FALSE, ...)
+}
+```
+
+## helper functions
+
+```{r}
+# Helper function to prepare timepoint data (eliminates code duplication)
+prepare_timepoint_data <- function(df, timepoint_name, timepoint_filter) {
+  cat("Preparing", timepoint_name, "data...\n")
+  
+  initial_data <- df %>% filter(eventname == timepoint_filter)
+  initial_n <- nrow(initial_data)
+  
+  # Check if 'exclude' column exists, if not use 'exclude_motion'
+  exclude_col <- if("exclude" %in% names(initial_data)) "exclude" else "exclude_motion"
+  
+  processed_data <- initial_data %>%
+    dplyr::select(src_subject_id, income, parental_education, sex, race_ethnicity_label, 
+                  all_of(exclude_col), rel_family_id, rsfmri_meanmotion, eventname, 
+                  site, age, imgincl_rsfmri_include) %>%
+    rename(exclude = all_of(exclude_col)) %>%
+    mutate(
+      # Convert scale() matrices to numeric vectors (fixes model issues)
+      income_z = as.numeric(scale(income)),
+      parent_ed_z = as.numeric(scale(parental_education)),
+      age_z = as.numeric(scale(age)),
+      
+      # Create clear binary coding
+      female = ifelse(sex == 2, 1, 0),
+      
+      # Ensure proper factor coding
+      race_ethnicity_label = as.factor(race_ethnicity_label),
+      site = as.factor(site)
+    )
+  
+  # Remove missing data with reporting
+  complete_data <- processed_data %>% drop_na()
+  final_n <- nrow(complete_data)
+  removed_n <- initial_n - final_n
+  
+  cat("✓", timepoint_name, ":", initial_n, "→", final_n, 
+      "participants (", removed_n, "removed due to missing data)\n")
+  
+  return(complete_data)
+}
+
+# Helper function to check model convergence
+check_model_convergence <- function(model, model_name) {
+  convergence_code <- model@optinfo$conv$opt
+  if (convergence_code != 0) {
+    warning(paste(model_name, "did not converge (code:", convergence_code, ")"))
+    return(FALSE)
+  } else {
+    cat("✓", model_name, "converged successfully\n")
+    return(TRUE)
+  }
+}
+
+# Helper function to perform model comparison
+perform_model_comparison <- function(full_model, reduced_model, comparison_name) {
+  cat("\n=== ", comparison_name, " ===\n")
+  
+  # Likelihood ratio test
+  lrt_results <- anova(full_model, reduced_model)
+  print(lrt_results)
+  
+  # Extract results
+  chi_sq <- lrt_results$Chisq[2]
+  df_diff <- lrt_results$Df[2]
+  p_value <- lrt_results$`Pr(>Chisq)`[2]
+  
+  cat("\nLRT Results:\n")
+  cat("χ²(", df_diff, ") = ", round(chi_sq, 2), ", p = ", round(p_value, 4), "\n", sep = "")
+  
+  # Bayesian comparison
+  tryCatch({
+    bf_results <- bayesfactor_models(full_model, reduced_model)
+    bf_value <- as.numeric(bf_results$BF[1])
+    cat("Bayes Factor: BF₁₀ = ", round(bf_value, 2), "\n", sep = "")
+    
+    return(list(p_value = p_value, bf_value = bf_value, chi_sq = chi_sq, df = df_diff))
+  }, error = function(e) {
+    cat("⚠️ Bayesian comparison failed:", e$message, "\n")
+    return(list(p_value = p_value, chi_sq = chi_sq, df = df_diff))
+  })
+}
+
+# Helper function to create odds ratio data for plotting
+extract_odds_ratios <- function(model, model_name) {
+  tryCatch({
+    or_data <- broom.mixed::tidy(model, effects = "fixed", conf.int = TRUE, exponentiate = TRUE) %>%
+      filter(grepl("race_ethnicity_label", term)) %>%
+      mutate(
+        race_ethnicity_label = gsub("race_ethnicity_label", "", term),
+        model = model_name
+      )
+    
+    # Select only the columns we need
+    or_data <- or_data %>%
+      dplyr::select(race_ethnicity_label, estimate, conf.low, conf.high, model)
+    
+    return(or_data)
+  }, error = function(e) {
+    cat("⚠️ Failed to extract odds ratios for", model_name, ":", e$message, "\n")
+    return(data.frame())
+  })
+}
+```
+
+## 4. data loading and preparation
+
+```{r data-loading}
+cat("=== Loading ABCD Data ===\n")
+
+# Validate file exists
+if (!file.exists(CONFIG$data_path)) {
+  stop("Data file not found: ", CONFIG$data_path)
+}
+
+# Load main dataset
+df_final_included <- readRDS(CONFIG$data_path)
+cat("✓ Loaded", nrow(df_final_included), "total records\n")
+
+# Prepare both timepoints using consistent function
+baseline_data <- prepare_timepoint_data(
+  df_final_included, 
+  "baseline", 
+  "baseline_year_1_arm_1"
+)
+
+followup_data <- prepare_timepoint_data(
+  df_final_included,
+  "followup", 
+  "2_year_follow_up_y_arm_1"
+)
+
+# Create longitudinal dataset
+common_subject_ids <- intersect(baseline_data$src_subject_id, followup_data$src_subject_id)
+cat("✓", length(common_subject_ids), "subjects have both timepoints\n")
+
+longitudinal_data <- bind_rows(
+  baseline_data %>% 
+    filter(src_subject_id %in% common_subject_ids) %>% 
+    mutate(timepoint = "baseline"),
+  followup_data %>% 
+    filter(src_subject_id %in% common_subject_ids) %>% 
+    mutate(timepoint = "followup")
+)
+
+# Add follow-up indicator to baseline data
+baseline_data <- baseline_data %>%
+  mutate(has_followup_data = src_subject_id %in% followup_data$src_subject_id)
+
+cat("✓ Created longitudinal dataset:", nrow(longitudinal_data), "observations\n")
+cat("✓", sum(baseline_data$has_followup_data), "baseline subjects have followup\n")
+```
+
+## Baseline exclusion analysis: 
+
+```{r}
+
+# Full model with race/ethnicity
+baseline_full_model <- glmer(
+  exclude ~ income_z + parent_ed_z + race_ethnicity_label + female + age_z +
+    (1 | rel_family_id) + 
+    (1 | site),
+  data = baseline_data, 
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# Reduced model without race/ethnicity
+baseline_reduced_model <- glmer(
+  exclude ~ income_z + parent_ed_z + female + age_z +
+    (1 | rel_family_id) +
+    (1 | site),
+  data = baseline_data, 
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# Check convergence
+baseline_full_converged <- check_model_convergence(baseline_full_model, "Baseline Full Model")
+
+baseline_reduced_converged <- check_model_convergence(baseline_reduced_model, "Baseline Reduced Model")
+
+
+```
+
+```{r}
+# Model comparison
+if (baseline_full_converged && baseline_reduced_converged) {
+  baseline_results <- perform_model_comparison(
+    baseline_full_model, 
+    baseline_reduced_model,
+    "Baseline Model Comparison"
+  )
+}
+
+cat("\nBaseline Analysis Summary:\n")
+
+cat("Sample size:", nrow(baseline_data), "participants\n")
+
+bf_result_race = bayesfactor_models(baseline_reduced_model, baseline_full_model)
+print(bf_result_race)
+
+```
+
+## summary of full baseline model: 
+```{r}
+summary(baseline_full_model)
+```
+
+## summary of reduced baseline model: 
+```{r}
+summary(baseline_reduced_model)
+```
+
+```{r}
+baseline_fixed <- broom.mixed::tidy(baseline_full_model, 
+                                   effects = "fixed", 
+                                   conf.int = TRUE)
+
+for(i in 1:nrow(baseline_fixed)) {
+  cat(sprintf("%s: β = %.3f, 95%% CI [%.3f, %.3f], p = %.3f\n",
+              baseline_fixed$term[i],
+              baseline_fixed$estimate[i],
+              baseline_fixed$conf.low[i], 
+              baseline_fixed$conf.high[i],
+              baseline_fixed$p.value[i]))
+}
+```
+## Follow up exclusion models:
+```{r}
+cat("=== Follow-up Motion Exclusion Analysis ===\n")
+
+# Full model with race/ethnicity
+followup_full_model <- glmer(
+  exclude ~ income_z + parent_ed_z + race_ethnicity_label + female + age_z +
+    (1 | rel_family_id) +
+    (1 | site),
+  data = followup_data, 
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# Reduced model without race/ethnicity
+followup_reduced_model <- glmer(
+  exclude ~ income_z + parent_ed_z + female + age_z +
+    (1 | rel_family_id) +
+    (1 | site),
+  data = followup_data, 
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# Check convergence
+followup_full_converged <- check_model_convergence(followup_full_model, "Follow-up Full Model")
+followup_reduced_converged <- check_model_convergence(followup_reduced_model, "Follow-up Reduced Model")
+```
+
+## summary of full and reduced follow up models:
+```{r}
+summary(followup_full_model)
+summary(followup_reduced_model)
+```
+
+
+```{r}
+# Model comparison
+if (followup_full_converged && followup_reduced_converged) {
+  followup_results <- perform_model_comparison(
+    followup_full_model, 
+    followup_reduced_model,
+    "Follow-up Model Comparison"
+  )
+}
+
+cat("\nFollow-up Analysis Summary:\n")
+cat("Sample size:", nrow(followup_data), "participants\n")
+
+```
+
+## Bayes factor for 2 yr follow up model:  
+```{r}
+bf_result_race = bayesfactor_models(followup_full_model, followup_reduced_model,
+                                    denominator = followup_reduced_model)
+print(bf_result_race)
+```
+## Longtiudinal exclusion model analysis (n = 4658)
+```{r}
+
+cat("=== Longitudinal Motion Exclusion Analysis ===\n")
+# Full model with race/ethnicity
+longitudinal_full_model <- glmer(
+  exclude ~ income_z + parent_ed_z + female + race_ethnicity_label + eventname + age_z +
+    (1 | rel_family_id/src_subject_id) +
+    (1 | site),
+  data = longitudinal_data, 
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# Reduced model without race/ethnicity
+longitudinal_reduced_model <- glmer(
+  exclude ~ income_z + parent_ed_z + female + eventname + age_z +
+    (1 | rel_family_id/src_subject_id) +
+    (1 | site),
+  data = longitudinal_data, 
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# Check convergence
+long_full_converged <- check_model_convergence(longitudinal_full_model, "Longitudinal Full Model")
+long_reduced_converged <- check_model_convergence(longitudinal_reduced_model, "Longitudinal Reduced Model")
+
+# Model comparison
+if (long_full_converged && long_reduced_converged) {
+  longitudinal_results <- perform_model_comparison(
+    longitudinal_full_model, 
+    longitudinal_reduced_model,
+    "Longitudinal Model Comparison"
+  )
+}
+
+cat("Sample size:", length(common_subject_ids), "subjects (", nrow(longitudinal_data), "observations)\n")
+```
+
+## summary of longtiduinal full and reduced models: 
+```{r}
+summary(longitudinal_full_model)
+summary(longitudinal_reduced_model)
+```
+
+
+## bayes factor for longtiduinal model: 
+```{r}
+bf_result_longitudinal = bayesfactor_models(longitudinal_full_model, longitudinal_reduced_model,
+                                            denominator = longitudinal_reduced_model)
+print(bf_result_longitudinal)
+```
+## plotting exclusion rates:
+
+```{r fig.height=8, fig.width=10}
+# Calculate exclusion summaries
+exclusion_summary_baseline <- baseline_data %>%  
+  group_by(race_ethnicity_label) %>%
+  summarise(
+    n = n(),
+    n_excluded = sum(exclude == 1, na.rm = TRUE),
+    percent_excluded = 100 * n_excluded / n,
+    .groups = "drop"
+  )
+
+exclusion_summary_followup <- followup_data %>%  
+  group_by(race_ethnicity_label) %>%
+  summarise(
+    n = n(),
+    n_excluded = sum(exclude == 1, na.rm = TRUE),
+    percent_excluded = 100 * n_excluded / n,
+    .groups = "drop"
+  )
+
+# Set consistent factor levels
+race_levels <- c("White", "Black", "Hispanic", "Asian", "Other")
+exclusion_summary_baseline$race_ethnicity_label <- factor(exclusion_summary_baseline$race_ethnicity_label, levels = race_levels)
+exclusion_summary_followup$race_ethnicity_label <- factor(exclusion_summary_followup$race_ethnicity_label, levels = race_levels)
+
+# Create baseline exclusion plot
+plot_baseline_exclusion <- ggplot(exclusion_summary_baseline, aes(x = race_ethnicity_label, y = percent_excluded, fill = race_ethnicity_label)) +
+  geom_col(show.legend = FALSE, width = 0.8, color = "black") +
+  geom_text(aes(label = sprintf("%.1f%%", percent_excluded)), vjust = -0.5, size = 5, color = "black") +
+  labs(
+    title = "Baseline",
+    x = "Race/Ethnicity",
+    y = "Percentage Excluded (%)"
+  ) +
+  ylim(0, 75) + 
+  scale_fill_viridis_d(option = "D") +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    axis.line = element_line(color = "black")
+  )
+
+# Create follow-up exclusion plot
+plot_followup_exclusion <- ggplot(exclusion_summary_followup, aes(x = race_ethnicity_label, y = percent_excluded, fill = race_ethnicity_label)) +
+  geom_col(show.legend = FALSE, width = 0.8, color = "black") +
+  geom_text(aes(label = sprintf("%.1f%%", percent_excluded)), vjust = -0.5, size = 5, color = "black") +
+  labs(
+    title = "2-Year Follow-up",
+    x = "Race/Ethnicity",
+    y = "Percentage Excluded (%)"
+  ) +
+  ylim(0, 75) +
+  scale_fill_viridis_d(option = "D") +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    axis.line = element_line(color = "black")
+  )
+
+# Extract odds ratios for plotting
+if (baseline_full_converged) {
+  or_baseline <- extract_odds_ratios(baseline_full_model, "Baseline")
+  or_baseline$race_ethnicity_label <- factor(or_baseline$race_ethnicity_label, levels = race_levels[-1])
+}
+
+if (followup_full_converged) {  
+  or_followup <- extract_odds_ratios(followup_full_model, "Follow-up")
+  or_followup$race_ethnicity_label <- factor(or_followup$race_ethnicity_label, levels = race_levels[-1])
+}
+
+# Create odds ratio plots
+if (exists("or_baseline") && nrow(or_baseline) > 0) {
+  plot_or_baseline <- ggplot(or_baseline, aes(x = estimate, y = race_ethnicity_label)) +
+    geom_point(color = "purple", size = 3) +
+    geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2, color = "black") +
+    geom_vline(xintercept = 1, linetype = "dashed", color = "brown") +
+    geom_text(aes(label = sprintf("%.2f", estimate)), vjust = -1, size = 5, color = "black") +
+    scale_x_continuous(limits = c(0.5, 2.5), breaks = seq(0.5, 2.5, 0.5)) +
+    labs(
+      title = "Baseline",
+      x = "Odds Ratio",
+      y = "Race/Ethnicity"
+    ) +
+    theme_minimal(base_size = 16) +
+    theme(
+      axis.text = element_text(color = "black"),
+      axis.title = element_text(color = "black"),
+      axis.ticks = element_line(color = "black"),
+      axis.line = element_line(color = "black")
+    )
+}
+
+if (exists("or_followup") && nrow(or_followup) > 0) {
+  plot_or_followup <- ggplot(or_followup, aes(x = estimate, y = race_ethnicity_label)) +
+    geom_point(color = "purple", size = 3) +  
+    geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2, color = "black") +
+    geom_vline(xintercept = 1, linetype = "dashed", color = "brown") +
+    geom_text(aes(label = sprintf("%.2f", estimate)), vjust = -1, size = 5, color = "black") +
+    scale_x_continuous(limits = c(0.5, 2.5), breaks = seq(0.5, 2.5, 0.5)) +
+    labs(
+      title = "2-Year Follow-up", 
+      x = "Odds Ratio",
+      y = "Race/Ethnicity"
+    ) +
+    theme_minimal(base_size = 16) +
+    theme(
+      axis.text = element_text(color = "black"),
+      axis.title = element_text(color = "black"),
+      axis.ticks = element_line(color = "black"),
+      axis.line = element_line(color = "black")
+    )
+}
+
+# Combine plots
+if (exists("plot_or_baseline") && exists("plot_or_followup")) {
+  combined_exclusion_plot <- (plot_baseline_exclusion | plot_followup_exclusion) / 
+                            (plot_or_baseline | plot_or_followup) +
+    plot_annotation(
+      title = "fMRI Exclusion by Race/Ethnicity: Prevalence and Odds Ratios",
+      theme = theme(plot.title = element_text(size = 20, face = "bold", hjust = 0.5))
+    )
+  
+  print(combined_exclusion_plot)
+  
+  # Save plot
+  ggsave(
+    filename = "exclusion_oddsratio.svg",
+    plot = combined_exclusion_plot,
+    path = CONFIG$output_dir,
+    width = 12,
+    height = 10,
+    units = "in"
+  )
+}
+
+```
+
+## create demographic tables:
+
+```{r}
+cat("=== Creating Demographic Tables ===\n")
+
+# Prepare variables for tables
+demographic_vars <- c("age_z", "sex", "race_ethnicity_label", "income", "parental_education")
+categorical_vars <- c("sex", "race_ethnicity_label", "income", "parental_education")
+
+# Convert age back to numeric for table
+baseline_data$age_numeric <- as.numeric(baseline_data$age_z)
+followup_data$age_numeric <- as.numeric(followup_data$age_z)
+
+# Create baseline demographics table
+baseline_table <- CreateTableOne(
+  vars = c("age_numeric", demographic_vars[-1]), 
+  strata = "exclude", 
+  data = baseline_data, 
+  factorVars = categorical_vars
+)
+
+print(baseline_table, showAllLevels = TRUE, quote = FALSE, noSpaces = TRUE, test = TRUE)
+
+```
+
+# print 2yr follow up table: 
+```{r}
+# Create follow-up demographics table  
+followup_table <- CreateTableOne(
+  vars = c("age_numeric", demographic_vars[-1]), 
+  strata = "exclude", 
+  data = followup_data, 
+  factorVars = categorical_vars
+)
+
+print(followup_table, showAllLevels = TRUE, quote = FALSE, noSpaces = TRUE, test = TRUE)
+```
+
+# export tables to word doc: 
+```{r}
+# Export tables to Word documents
+tryCatch({
+  # Baseline table
+  baseline_table_matrix <- print(baseline_table, showAllLevels = TRUE, quote = FALSE, 
+                                noSpaces = TRUE, printToggle = FALSE, test = TRUE)
+  baseline_table_df <- as.data.frame(baseline_table_matrix)
+  baseline_flextable <- flextable(baseline_table_df)
+  
+  save_as_docx(
+    baseline_flextable,
+    path = file.path(CONFIG$output_dir, "baseline_demographics_table.docx")
+  )
+  
+  # Follow-up table
+  followup_table_matrix <- print(followup_table, showAllLevels = TRUE, quote = FALSE, 
+                                noSpaces = TRUE, printToggle = FALSE, test = TRUE)
+  followup_table_df <- as.data.frame(followup_table_matrix)
+  followup_flextable <- flextable(followup_table_df)
+  
+  save_as_docx(
+    followup_flextable,
+    path = file.path(CONFIG$output_dir, "followup_demographics_table.docx")
+  )
+  
+  cat("✓ Demographic tables saved to", CONFIG$output_dir, "\n")
+  
+}, error = function(e) {
+  cat("⚠️ Failed to save demographic tables:", e$message, "\n")
+})
+```
+
+<<<<<<< HEAD
+=======
+
+## consort flow diagram
+```{r consort-flow-diagrams, fig.height=12, fig.width=10}
+
+cat("=== Creating CONSORT Flow Diagrams ===\n")
+
+
+
+
+# Calculate flow numbers from the original dataset
+dairc_data_test <- sum(dairc_data$eventname == "baseline_year_1_arm_1")
+
+dairc_data_test <- sum(dairc_data$eventname == "baseline_year_1_arm_1" & 
+                       df_final_included$imgincl_rsfmri_include == 1, na.rm = TRUE)
+cat("Baseline records in df_final_included:", dairc_data_test, "\n")
+total_dairc_included <- nrow(dairc_data_baseline)
+
+
+baseline_raw_n <- sum(df_final_included$eventname == "baseline_year_1_arm_1", na.rm = TRUE)
+followup_raw_n <- sum(df_final_included$eventname == "2_year_follow_up_y_arm_1", na.rm = TRUE)
+
+# Calculate exclusions for baseline analysis
+baseline_excluded_motion <- sum(baseline_data$exclude == 1, na.rm = TRUE)
+baseline_included_final <- sum(baseline_data$exclude == 0, na.rm = TRUE)
+
+# Calculate exclusions for follow-up analysis  
+followup_excluded_motion <- sum(followup_data$exclude == 1, na.rm = TRUE)
+followup_included_final <- sum(followup_data$exclude == 0, na.rm = TRUE)
+
+consort_exclusion <- add_box(txt = paste("DAIRC = 0 OR 1. Complete baseline Data Participants\n(N =", format(total_dairc_included, big.mark = ","), ")")) %>%
+  
+  add_split(txt = c(
+    paste("Baseline Records\n(N =", format(baseline_raw_n, big.mark = ","), ")"),
+    paste("2-yr Follow-up Records\n(N =", format(followup_raw_n, big.mark = ","), ")")
+  )) %>%
+  
+  add_box(txt = c(
+    paste("Complete Demographics\nBaseline Analysis DAIRC =1\n(N =", format(nrow(baseline_data), big.mark = ","), ")"),
+    paste("Complete Demographics\n2-yr Follow-up Analysis DAIRC =1\n(N =", format(nrow(followup_data), big.mark = ","), ")")
+  )) %>%
+  
+  add_split(txt = list(
+    c(paste("Low Motion\nIncluded\n(N =", format(baseline_included_final, big.mark = ","), ")"),
+      paste("High Motion\nExcluded\n(N =", format(baseline_excluded_motion, big.mark = ","), ")")),
+    c(paste("Low Motion\nIncluded\n(N =", format(followup_included_final, big.mark = ","), ")"),
+      paste("High Motion\nExcluded\n(N =", format(followup_excluded_motion, big.mark = ","), ")"))
+  )) %>%
+  
+  add_box(txt = paste("Longitudinal Sample\nBoth timepoints\n(N =", format(length(common_subject_ids), big.mark = ","), "subjects)"))
+
+# Generate and display the plot without side boxes first
+plot(consort_exclusion)
+
+
+# # SVG
+# svg("consort_exclusion.svg", width = 10, height = 8)
+# print(consort_exclusion)
+# dev.off()
+
+# # JPEG
+# jpeg("consort_exclusion.jpg", width = 10, height = 8, units = "in", res = 300)
+# print(consort_exclusion)
+# dev.off()
+
+
+```
+
+## consort flow diagram
+```{r consort-flow-diagrams, fig.height=12, fig.width=10}
+
+#dairc_data loaded in only for the purposes of this consort diagram. 
+dairc_data_baseline <- prepare_timepoint_data(
+  dairc_data, 
+  "baseline", 
+  "baseline_year_1_arm_1"
+)
+
+dairc_data_followup <- prepare_timepoint_data(
+  dairc_data,
+  "followup", 
+  "2_year_follow_up_y_arm_1"
+)
+
+
+cat("=== Creating CONSORT Flow Diagrams ===\n")
+
+baseline_data_n = nrow(baseline_data)
+followup_data_n = nrow(followup_data)
+
+dairc_data_full <- sum(dairc_data$eventname == "baseline_year_1_arm_1" | 
+                       dairc_data$eventname == "2_year_follow_up_y_arm_1", na.rm = TRUE)
+# Calculate flow numbers from dairc_data (from another script)
+baseline_raw_n <- sum(dairc_data$eventname == "baseline_year_1_arm_1", na.rm = TRUE)
+followup_raw_n <- sum(dairc_data$eventname == "2_year_follow_up_y_arm_1", na.rm = TRUE)
+
+# Calculate DAIRC = 1 counts from dairc_data (these should be 10,280 and 6,538)
+baseline_dairc_n <- sum(dairc_data$eventname == "baseline_year_1_arm_1" & 
+                       dairc_data$imgincl_rsfmri_include == 1, na.rm = TRUE)
+
+followup_dairc_n <- sum(dairc_data$eventname == "2_year_follow_up_y_arm_1" & 
+                       dairc_data$imgincl_rsfmri_include == 1, na.rm = TRUE)
+
+# Calculate exclusions for baseline analysis
+baseline_excluded_motion <- sum(baseline_data$exclude == 1, na.rm = TRUE)
+baseline_included_final <- sum(baseline_data$exclude == 0, na.rm = TRUE)
+
+# Calculate exclusions for follow-up analysis  
+followup_excluded_motion <- sum(followup_data$exclude == 1, na.rm = TRUE)
+followup_included_final <- sum(followup_data$exclude == 0, na.rm = TRUE)
+
+dairc_data_baseline_n <- nrow(dairc_data_baseline)
+dairc_data_followup_n <- nrow(dairc_data_followup)
+
+consort_exclusion <- add_box(txt = paste("All baseline & 2 year follow up records: \n(N =", format(dairc_data_full, big.mark = ","), ")")) %>%
+  
+  add_split(txt = c(
+    paste("Baseline Participants\n(N =", format(baseline_raw_n, big.mark = ","), ")"),
+    paste("2-yr Follow-up Participants\n(N =", format(followup_raw_n, big.mark = ","), ")")
+  )) %>%
+  
+  add_box(txt = c(
+    paste("Participants with Complete Demographics\nBaseline Analysis \n(N =", format(dairc_data_baseline_n, big.mark = ","), ")"),
+    paste("Participants with Complete Demographics\n2-yr Follow-up Analysis \n(N =", format(dairc_data_followup_n, big.mark = ","), ")")
+  )) %>%
+  
+    add_box(txt = c(
+    paste("Complete Demographics\nBaseline Analysis DAIRC =1\n(N =", format(baseline_data_n, big.mark = ","), ")"),
+    paste("Complete Demographics\n2-yr Follow-up Analysis DAIRC =1\n(N =", format(followup_data_n, big.mark = ","), ")")
+  )) %>%
+  
+  add_split(txt = list(
+    c(paste("Low Motion\nIncluded\n(N =", format(baseline_included_final, big.mark = ","), ")"),
+      paste("High Motion\nExcluded\n(N =", format(baseline_excluded_motion, big.mark = ","), ")")),
+    c(paste("Low Motion\nIncluded\n(N =", format(followup_included_final, big.mark = ","), ")"),
+      paste("High Motion\nExcluded\n(N =", format(followup_excluded_motion, big.mark = ","), ")"))
+  )) %>%
+  
+  add_box(txt = paste("Longitudinal Sample\nBoth timepoints\n(N =", format(length(common_subject_ids), big.mark = ","), "subjects)"))
+
+# Generate and display the plot
+plot(consort_exclusion)
+
+# JPEG
+jpeg(file.path(CONFIG$output_dir, "consort_exclusion.jpg"), width = 10, height = 8, units = "in", res = 300)
+print(consort_exclusion)
+dev.off()
+
+# SVG
+postscript(file.path(CONFIG$output_dir, "consort_exclusion.eps"), width = 10, height = 8)
+print(consort_exclusion)
+dev.off()
+```
+
+>>>>>>> cbdf9d8 (update code)
+## results summary:
+```{r}
+cat("=== Final Results Summary ===\n\n")
+
+cat("Sample Sizes:\n")
+cat("Baseline:", nrow(baseline_data), "participants\n")
+cat("Follow-up:", nrow(followup_data), "participants\n") 
+cat("Longitudinal:", length(common_subject_ids), "subjects (", nrow(longitudinal_data), "observations)\n")
+cat("\n=== Analysis Complete ===\n")
+```
+
+
+## session info:
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
