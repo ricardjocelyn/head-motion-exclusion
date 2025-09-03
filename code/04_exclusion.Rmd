@@ -1,5 +1,5 @@
 ---
-title: "04 exclusion analyses - refactored using claude"
+title: "Racial and ethnic disparities in data exclusion are present at baseline, but not at the 2-year follow up:"
 output: html_document
 date: "2025-09-02"
 ---
@@ -8,18 +8,16 @@ date: "2025-09-02"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## load required packages:
+
+**Next, we assessed the role of race/ethnicity in predicting exclusion due to high-motion status at baseline using both frequentist and Bayesian approaches. At baseline, exclusion due to high-motion rates on the full sample (n = 8561) were highest for Black participants (48.3%), followed by Hispanic (44.8%), Asian (43.5%), Other (37.9%) and White (35.4%) participants (Fig. 3, top). At the 2-year follow-up (n = 5789), overall exclusion rates declined across all groups, consistent with decreased motion across child development as well as increased exclusion and loss to followup for high-motion individuals. Rates remained highest among Black (33.5%) and Asian (29.7%) participants, followed by Other (28.1%), Hispanic (26.3%), and White (24%) participants (Fig. 3, bottom). Demographic breakdowns for the full sample at baseline and follow up are described in Table 5 and Table 6, respectively.** 
+
+## 1. load required packages:
 
 ```{r}
 required_packages <- c(
   "lme4", "dplyr", "broom", "bayestestR", "ggplot2", "stats", "e1071", "tidyr",
   "patchwork", "multcomp", "lmerTest", "broom.mixed", "tableone", "flextable",
-<<<<<<< HEAD
-  "officer", "readr", "jsonlite", "BayesFactor", "MuMIn", "brms", "cmdstanr"
-=======
-  "officer", "readr", "jsonlite", "BayesFactor", "MuMIn", "brms", "cmdstanr", "consort"
->>>>>>> cbdf9d8 (update code)
-)
+  "officer", "readr", "jsonlite", "BayesFactor", "MuMIn", "brms","consort")
 
 for (pkg in required_packages) {
   if (!requireNamespace(pkg, quietly = TRUE)) {
@@ -32,7 +30,7 @@ for (pkg in required_packages) {
 cat("✓ All packages loaded successfully\n")
 ```
 
-## configuration for data and output directories: 
+## 2. configuration for data and output directories: 
 
 ```{r}
 # Configuration constants
@@ -41,10 +39,7 @@ CONFIG <- list(
   na_codes = c("777", "888", "999"),
   na_numeric = c(777, 888, 999), # 777 refuse to answer 888 decline to answer/question not asked 999 dont know
   data_dir = "/Users/ricard/Desktop/poldrack/abcd/data/abcd-data-release-5/core/",
-<<<<<<< HEAD
-=======
   dairc_data <- readRDS("/Users/ricard/Desktop/poldrack/projects/head-motion-exclusion/data/df_final_all-refactored.rds"),
->>>>>>> cbdf9d8 (update code)
   output_dir = "/Users/ricard/Desktop/poldrack/projects/head-motion-exclusion/outputs",
   data_path = "/Users/ricard/Desktop/poldrack/projects/head-motion-exclusion/data/df_final_included-refactored.rds",
   model_control = glmerControl(
@@ -67,7 +62,7 @@ read_abcd_csv <- function(path, ...) {
 }
 ```
 
-## helper functions
+## 3. helper functions
 
 ```{r}
 # Helper function to prepare timepoint data (eliminates code duplication)
@@ -221,7 +216,9 @@ cat("✓ Created longitudinal dataset:", nrow(longitudinal_data), "observations\
 cat("✓", sum(baseline_data$has_followup_data), "baseline subjects have followup\n")
 ```
 
-## Baseline exclusion analysis: 
+## 5. Baseline exclusion analysis: 
+
+**To identify predictors of data exclusion due to high head motion in the baseline data, we fitted a series of generalized linear mixed-effects models modeling exclusion based on high-motion status as a function of racial/ethnic group with covariates including household income, parental education, age, and sex while also accounting for random intercepts for study site and family ID. At baseline (ages 9-10), there were significant racial/ethnic disparities in exclusion based on high-motion status. Consistent with prior work examining high-head motion status (Cosgrove et al., 2022), a model comparison showed that including race/ethnicity significantly outperformed the model without race/ethnicity (χ²(4) = 21.13, p < .001); here again the Bayes Factor preferred the reduced model (BF10 = 5.2e-04), suggesting that the significant effect nonetheless provides weak evidence for the alternative hypothesis. Group-specific estimates revealed that, relative to White participants, the odds of being excluded for high head motion were significantly higher for Black (OR = 1.23, 95% CI [1.04, 1.45], p = .013), Hispanic (OR = 1.34, 95% CI [1.16, 1.56], p < .001), and Asian (OR = 1.50, 95% CI [1.07, 2.12], p = .02) participants. This was not the case for participants who identified as ‘Other’ (OR = 1.03, CI [0.88, 1.21], p = 0.71). These effects are illustrated in Fig. 4 in terms of predicted probabilities (probability of exclusion), adjusted for all continuous covariates at their mean values for race/ethnicity and mean head motion.**
 
 ```{r}
 
@@ -252,6 +249,8 @@ baseline_reduced_converged <- check_model_convergence(baseline_reduced_model, "B
 
 
 ```
+
+# model comparison
 
 ```{r}
 # Model comparison
@@ -296,7 +295,11 @@ for(i in 1:nrow(baseline_fixed)) {
               baseline_fixed$p.value[i]))
 }
 ```
-## Follow up exclusion models:
+
+## 6. 2 year follow up exclusion models:
+
+**In the 2-year follow-up data (ages 11-13), these racial/ethnic disparities in high-head motion status exclusion were no longer present. The GLMER analysis at the 2-year follow up revealed no significant differences in the odds of exclusion based on high-head motion status for any racial/ethnic group compared to White participants (χ²(4) = 2.5, p = 0.64, BF10 = 1.04e-07, in favor of the reduced model). **
+
 ```{r}
 cat("=== Follow-up Motion Exclusion Analysis ===\n")
 
@@ -325,13 +328,17 @@ followup_full_converged <- check_model_convergence(followup_full_model, "Follow-
 followup_reduced_converged <- check_model_convergence(followup_reduced_model, "Follow-up Reduced Model")
 ```
 
-## summary of full and reduced follow up models:
+# summary of full followup model:
 ```{r}
 summary(followup_full_model)
+```
+
+# summary of reduced model followup model: 
+```{r}
 summary(followup_reduced_model)
 ```
 
-
+# model comparison: 
 ```{r}
 # Model comparison
 if (followup_full_converged && followup_reduced_converged) {
@@ -353,7 +360,11 @@ bf_result_race = bayesfactor_models(followup_full_model, followup_reduced_model,
                                     denominator = followup_reduced_model)
 print(bf_result_race)
 ```
-## Longtiudinal exclusion model analysis (n = 4658)
+
+## 7. Longtiudinal exclusion model analysis (n = 4658)
+
+**A longitudinal model examining youth with data at both timepoints (n = 4658) simultaneously found that after controlling for covariates (sex, age, parental education, household income), race/ethnicity was not a statistically significant predictor of high-motion status. A model comparison confirmed that adding race/ethnicity did not significantly improve model fit (χ²(4) = 5.81, p = 0.214, BF10 = 2.10e-07 in favor of the reduced model), suggesting no overall effect of race/ethnicity across the two timepoints (Table 4). However, there was a significant effect of study visit on high-motion status, with participants more likely to be excluded at the baseline visit compared to the two-year follow-up (β = 0.99, z = 17.35, p < .001, BF10 = 1.39e+72 favoring the full model), consistent with a reduction in head motion across development and greater failure to retain individuals with higher trait levels of head motion.** 
+
 ```{r}
 
 cat("=== Longitudinal Motion Exclusion Analysis ===\n")
@@ -393,12 +404,15 @@ if (long_full_converged && long_reduced_converged) {
 cat("Sample size:", length(common_subject_ids), "subjects (", nrow(longitudinal_data), "observations)\n")
 ```
 
-## summary of longtiduinal full and reduced models: 
+# summary of longitudinal full model: 
 ```{r}
 summary(longitudinal_full_model)
-summary(longitudinal_reduced_model)
 ```
 
+# summary of longitudinal reduced model: 
+```{r}
+summary(longitudinal_reduced_model)
+```
 
 ## bayes factor for longtiduinal model: 
 ```{r}
@@ -406,7 +420,11 @@ bf_result_longitudinal = bayesfactor_models(longitudinal_full_model, longitudina
                                             denominator = longitudinal_reduced_model)
 print(bf_result_longitudinal)
 ```
-## plotting exclusion rates:
+
+
+## 8. plotting exclusion at baseline:  
+
+**At baseline, exclusion due to high-motion rates on the full sample (n = 8561) were highest for Black participants (48.3%), followed by Hispanic (44.8%), Asian (43.5%), Other (37.9%) and White (35.4%) participants (Fig. 3, top). At the 2-year follow-up (n = 5789), overall exclusion rates declined across all groups, consistent with decreased motion across child development as well as increased exclusion and loss to followup for high-motion individuals.**
 
 ```{r fig.height=8, fig.width=10}
 # Calculate exclusion summaries
@@ -620,76 +638,8 @@ tryCatch({
 })
 ```
 
-<<<<<<< HEAD
-=======
 
-## consort flow diagram
-```{r consort-flow-diagrams, fig.height=12, fig.width=10}
-
-cat("=== Creating CONSORT Flow Diagrams ===\n")
-
-
-
-
-# Calculate flow numbers from the original dataset
-dairc_data_test <- sum(dairc_data$eventname == "baseline_year_1_arm_1")
-
-dairc_data_test <- sum(dairc_data$eventname == "baseline_year_1_arm_1" & 
-                       df_final_included$imgincl_rsfmri_include == 1, na.rm = TRUE)
-cat("Baseline records in df_final_included:", dairc_data_test, "\n")
-total_dairc_included <- nrow(dairc_data_baseline)
-
-
-baseline_raw_n <- sum(df_final_included$eventname == "baseline_year_1_arm_1", na.rm = TRUE)
-followup_raw_n <- sum(df_final_included$eventname == "2_year_follow_up_y_arm_1", na.rm = TRUE)
-
-# Calculate exclusions for baseline analysis
-baseline_excluded_motion <- sum(baseline_data$exclude == 1, na.rm = TRUE)
-baseline_included_final <- sum(baseline_data$exclude == 0, na.rm = TRUE)
-
-# Calculate exclusions for follow-up analysis  
-followup_excluded_motion <- sum(followup_data$exclude == 1, na.rm = TRUE)
-followup_included_final <- sum(followup_data$exclude == 0, na.rm = TRUE)
-
-consort_exclusion <- add_box(txt = paste("DAIRC = 0 OR 1. Complete baseline Data Participants\n(N =", format(total_dairc_included, big.mark = ","), ")")) %>%
-  
-  add_split(txt = c(
-    paste("Baseline Records\n(N =", format(baseline_raw_n, big.mark = ","), ")"),
-    paste("2-yr Follow-up Records\n(N =", format(followup_raw_n, big.mark = ","), ")")
-  )) %>%
-  
-  add_box(txt = c(
-    paste("Complete Demographics\nBaseline Analysis DAIRC =1\n(N =", format(nrow(baseline_data), big.mark = ","), ")"),
-    paste("Complete Demographics\n2-yr Follow-up Analysis DAIRC =1\n(N =", format(nrow(followup_data), big.mark = ","), ")")
-  )) %>%
-  
-  add_split(txt = list(
-    c(paste("Low Motion\nIncluded\n(N =", format(baseline_included_final, big.mark = ","), ")"),
-      paste("High Motion\nExcluded\n(N =", format(baseline_excluded_motion, big.mark = ","), ")")),
-    c(paste("Low Motion\nIncluded\n(N =", format(followup_included_final, big.mark = ","), ")"),
-      paste("High Motion\nExcluded\n(N =", format(followup_excluded_motion, big.mark = ","), ")"))
-  )) %>%
-  
-  add_box(txt = paste("Longitudinal Sample\nBoth timepoints\n(N =", format(length(common_subject_ids), big.mark = ","), "subjects)"))
-
-# Generate and display the plot without side boxes first
-plot(consort_exclusion)
-
-
-# # SVG
-# svg("consort_exclusion.svg", width = 10, height = 8)
-# print(consort_exclusion)
-# dev.off()
-
-# # JPEG
-# jpeg("consort_exclusion.jpg", width = 10, height = 8, units = "in", res = 300)
-# print(consort_exclusion)
-# dev.off()
-
-
-```
-
-## consort flow diagram
+## 9. consort flow diagram
 ```{r consort-flow-diagrams, fig.height=12, fig.width=10}
 
 #dairc_data loaded in only for the purposes of this consort diagram. 
@@ -775,7 +725,6 @@ print(consort_exclusion)
 dev.off()
 ```
 
->>>>>>> cbdf9d8 (update code)
 ## results summary:
 ```{r}
 cat("=== Final Results Summary ===\n\n")

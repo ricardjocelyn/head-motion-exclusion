@@ -31,7 +31,7 @@ for (pkg in required_packages) {
 cat("✓ All packages loaded successfully\n")
 ```
 
-## 2. configuration constriants
+## 2. configuration constraints
 
 ```{r config}
 # Configuration constants
@@ -312,7 +312,7 @@ if (attrition_full_converged && attrition_reduced_converged) {
 summary(attrition_full_model)
 ```
 
-## retention full model summary 
+## retention reduced model summary 
 ```{r}
 summary(attrition_reduced_model)
 ```
@@ -321,6 +321,8 @@ summary(attrition_reduced_model)
 ## 6. bayes factors for retention models
 
 # return bayes factor for individual race predictors 
+
+**To further evaluate the importance of individual race categories, we calculated Bayes factors comparing models that combined each specific race group with White versus the full model that treated all race categories separately. The Bayes factor for Black was 2189.6, indicating strong evidence that Black participants should be modeled separately from White participants. In contrast, Hispanic, Asian, and Other groups showed BF10 values of 0.0177, 0.068, and 0.256 respectively, indicating little evidence to model these categories separately.**
 
 ```{r}
 race_levels <- levels(baseline_data$race_ethnicity_label)
@@ -364,6 +366,8 @@ for (race in race_levels) {
 
 bf_results
 ```
+
+**A likelihood ratio test comparing the full model (including all race indicators) to a reduced model (excluding race) also supported the inclusion of race overall (χ²(4) = 29.6, p = < 0.001). However, a BIC-based Bayes factor comparing these two models yielded BF10 ≈ 0.04 in favor of the reduced model, suggesting that from a Bayesian model selection perspective, including all race indicators may not be justified by the increase in model complexity. The parameter estimates for other covariates were similar in the reduced model (Table 1, right side).**
 
 ```{r}
 # BIC-BF for full vs reduced model
@@ -570,6 +574,10 @@ all_bfs$age_z
 
 ## 7. return odds ratios for full and reduced models 
 
+**We assessed the role of race/ethnicity in predicting follow-up participation using both frequentist and Bayesian approaches. Compared to White participants, the odds of retention were significantly lower for Black individuals (OR = 0.63, 95% CI [0.52, 0.75], p < .001) and for those in the Other race category (OR = 0.80, 95% CI [0.67, 0.95], p = .012), whereas no other race groups differed significantly from White participants. These effects are illustrated in Fig. 1 in terms of predicted probabilities (probability of retention), adjusted for all continuous covariates at their mean values for race/ethnicity and mean head motion.** 
+
+
+
 ```{r}
 extract_OR_table <- function(model) {
   # tidy output with confint
@@ -600,6 +608,7 @@ print(tbl_reduced) # reduced retention model (table 1)
 ```
 
 ## 8. calculate predicted probabilites by race/ethnicity to plot: 
+
 
 ```{r}
 # Get predicted probabilities by race/ethnicity
@@ -684,6 +693,8 @@ ggsave(
 ```
 
 ## 10. Results Summary
+
+**Taken together, these results illustrate the complexity of modeling race/ethnicity. Although the overall contribution of race to model fit is ambiguous across inferential frameworks, there is consistent and strong evidence that Black participants are substantially less likely to have follow-up data compared to white participants, even after adjusting for socioeconomic and demographic factors.**
 
 ```{r results-summary}
 cat("=== Final Results Summary ===\n\n")

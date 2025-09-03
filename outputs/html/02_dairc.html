@@ -357,7 +357,7 @@ claude</h1>
 
 
 <div id="load-required-packages" class="section level2">
-<h2>Load Required Packages</h2>
+<h2>1. load required packages</h2>
 <pre class="r"><code>required_packages &lt;- c(
   &quot;lme4&quot;, &quot;dplyr&quot;, &quot;broom&quot;, &quot;bayestestR&quot;, &quot;ggplot2&quot;, &quot;stats&quot;, &quot;e1071&quot;, &quot;tidyr&quot;,
   &quot;patchwork&quot;, &quot;multcomp&quot;, &quot;lmerTest&quot;, &quot;broom.mixed&quot;, &quot;tableone&quot;, &quot;flextable&quot;,
@@ -376,10 +376,10 @@ cat(&quot;✓ All packages loaded successfully\n&quot;)</code></pre>
 <pre><code>## ✓ All packages loaded successfully</code></pre>
 </div>
 <div id="configuration-and-helper-functions" class="section level2">
-<h2>Configuration and Helper Functions</h2>
+<h2>2. configuration and helper functions</h2>
 <pre class="r"><code># Configuration constants
 CONFIG &lt;- list(
-  data_path = &quot;/Users/ricard/Desktop/poldrack/projects/head-motion-exclusion/df_final_all.rds&quot;, #includes all dairc = 0 AND =1
+  data_path = &quot;/Users/ricard/Desktop/poldrack/projects/head-motion-exclusion/data/df_final_all-refactored.rds&quot;,
   model_control = glmerControl(
     optimizer = &quot;bobyqa&quot;,
     optCtrl = list(maxfun = 2e5)
@@ -521,7 +521,7 @@ create_model_summary &lt;- function(model, model_name) {
 }</code></pre>
 </div>
 <div id="load-and-validate-data" class="section level2">
-<h2>Load and Validate Data</h2>
+<h2>3. load and validate data</h2>
 <pre class="r"><code>cat(&quot;=== Loading ABCD Data ===\n&quot;)</code></pre>
 <pre><code>## === Loading ABCD Data ===</code></pre>
 <pre class="r"><code># Validate file exists
@@ -543,7 +543,7 @@ cat(&quot;✓ Raw baseline records:&quot;, baseline_raw_count, &quot;\n&quot;)</
 <pre><code>## ✓ Raw followup records: 10908</code></pre>
 </div>
 <div id="data-preparation" class="section level2">
-<h2>Data Preparation</h2>
+<h2>4. data preparation</h2>
 <pre class="r"><code>cat(&quot;=== Data Preparation ===\n&quot;)</code></pre>
 <pre><code>## === Data Preparation ===</code></pre>
 <pre class="r"><code># Prepare both timepoints using consistent function (eliminates duplication)
@@ -583,46 +583,22 @@ baseline_data &lt;- prepare_timepoint_data(
 ## # A tibble: 12 × 2
 ##    variable               missing_n
 ##    &lt;chr&gt;                      &lt;int&gt;
-##  1 parental_education          7335
-##  2 parent_ed_z                 7335
-##  3 income                      4175
-##  4 income_z                    4175
-##  5 sex                         3627
-##  6 site                        3627
-##  7 age                         3627
-##  8 age_z                       3627
-##  9 female                      3627
-## 10 rsfmri_meanmotion           2984
-## 11 imgincl_rsfmri_include      2796
+##  1 income                      4175
+##  2 income_z                    4175
+##  3 sex                         3627
+##  4 site                        3627
+##  5 age                         3627
+##  6 age_z                       3627
+##  7 female                      3627
+##  8 rsfmri_meanmotion           2984
+##  9 imgincl_rsfmri_include      2796
+## 10 parental_education           102
+## 11 parent_ed_z                  102
 ## 12 rel_family_id                  3
-## ⚠️ All data lost with complete case analysis. Trying with essential variables only...
-## With essential variables only: 8112 records retained
-## ✓ followup : 10908 → 8112 participants ( 2796 removed due to missing data)</code></pre>
-<pre class="r"><code># # Create longitudinal dataset only if both timepoints have data
-# if (nrow(baseline_data) &gt; 0 &amp;&amp; nrow(followup_data) &gt; 0) {
-#   common_subject_ids &lt;- intersect(baseline_data$src_subject_id, followup_data$src_subject_id)
-#   cat(&quot;✓&quot;, length(common_subject_ids), &quot;subjects have both timepoints\n&quot;)
-#   
-#   # if (length(common_subject_ids) &gt; 0) {
-#   #   longitudinal_data &lt;- bind_rows(
-#   #     baseline_data %&gt;% 
-#   #       filter(src_subject_id %in% common_subject_ids) %&gt;% 
-#   #       mutate(timepoint = &quot;baseline&quot;),
-#   #     followup_data %&gt;% 
-#   #       filter(src_subject_id %in% common_subject_ids) %&gt;% 
-#   #       mutate(timepoint = &quot;followup&quot;)
-#   #  )
-#     
-#     # Add follow-up indicator to baseline data
-#     baseline_data &lt;- baseline_data %&gt;%
-#       mutate(has_followup_data = src_subject_id %in% followup_data$src_subject_id)
-#     
-#     cat(&quot;✓&quot;, sum(baseline_data$has_followup_data), &quot;baseline subjects have followup\n&quot;)
-# 
-#   }</code></pre>
+## ✓ followup : 10908 → 6538 participants ( 4370 removed due to missing data)</code></pre>
 </div>
 <div id="data-quality-summary" class="section level2">
-<h2>Data Quality Summary</h2>
+<h2>4.1 data quality summary</h2>
 <pre class="r"><code>cat(&quot;=== Data Quality Summary ===\n&quot;)</code></pre>
 <pre><code>## === Data Quality Summary ===</code></pre>
 <pre class="r"><code>if (nrow(baseline_data) &gt; 0) {
@@ -678,14 +654,24 @@ baseline_data &lt;- prepare_timepoint_data(
 ##     5634     1398     1980      199     1069</code></pre>
 </div>
 <div id="dairc-inclusion-analysis" class="section level2">
-<h2>DAIRC Inclusion Analysis</h2>
+<h2>5. DAIRC Inclusion Analysis</h2>
 <div id="model-1-full-model-with-raceethnicity" class="section level3">
 <h3>Model 1: Full Model (with race/ethnicity)</h3>
 <blockquote>
 <blockquote>
-<p><strong>First,</strong></p>
+<p><strong>First, we fit a generalized linear mixed-effects model
+predicting the binary DAIRC inclusion variable (imgincl_rsfmri_include)
+to assess whether the initial quality control criteria had a racially
+disparate effect (N = 10280). The model included fixed effects for
+household income, parental education, sex, age, and race/ethnicity, with
+random intercepts for family ID and site to account for nested data
+structure. </strong></p>
 </blockquote>
 </blockquote>
+<p><strong>Black participants were significantly less likely to be
+included compared to White participants based upon the DAIRC-criterion,
+but the Bayes factor supported the null (OR = 0.79, 95% CI [0.66, 0.95],
+p = 0.012, BF10 = 0.21).</strong></p>
 <pre class="r"><code>cat(&quot;=== DAIRC Full Model Analysis ===\n&quot;)</code></pre>
 <pre><code>## === DAIRC Full Model Analysis ===</code></pre>
 <pre class="r"><code># Check if we have necessary variables for modeling
@@ -891,12 +877,18 @@ if (all(reduced_model_vars %in% names(baseline_data)) &amp;&amp; nrow(baseline_d
 </div>
 </div>
 <div id="model-comparison" class="section level2">
-<h2>Model Comparison</h2>
+<h2>6. Model Comparison</h2>
 <div id="likelihood-ratio-test" class="section level3">
 <h3>Likelihood Ratio Test</h3>
 <blockquote>
 <blockquote>
-<p><strong>A likelihood ratio test</strong></p>
+<p><strong>However, a likelihood ratio test comparing the full model to
+a reduced model without the race/ethnicity term was not statistically
+significant (χ²(4) = 8.76, p = .07, BF10 = 7.54e-07), with the Bayes
+factor providing strong evidence that the race/ethnicity variable did
+not improve model fit. Given that the DAIRC exclusion criteria do not
+have a racially divergent impact, the subsequent analyses used the
+DAIRC-included sample as used by Cosgrove et al., 2022.</strong></p>
 </blockquote>
 </blockquote>
 <pre class="r"><code>cat(&quot;=== Model Comparison: Likelihood Ratio Test ===\n&quot;)</code></pre>
@@ -933,8 +925,8 @@ if (exists(&quot;full_converged&quot;) &amp;&amp; exists(&quot;reduced_converged
 ## 
 ## Interpretation: Race/ethnicity does NOT significantly improve model fit (p = 0.0675 )</code></pre>
 </div>
-<div id="bayesian-model-comparison-fo-individual-race-predictors" class="section level3">
-<h3>Bayesian Model Comparison fo individual race predictors</h3>
+<div id="bayesian-model-comparison-for-individual-race-predictors" class="section level3">
+<h3>7. Bayesian Model Comparison for individual race predictors</h3>
 <pre class="r"><code>library(forcats)
 
 race_levels &lt;- levels(baseline_data$race_ethnicity_label)
@@ -1241,7 +1233,7 @@ all_bfs$age_z</code></pre>
 ## * Against Denominator: [reduced_model] income_z + parent_ed_z + female + (1 | rel_family_id) + (1 | site)
 ## *   Bayes Factor Type: BIC approximation</code></pre>
 <div id="results-summary" class="section level2">
-<h2>Results Summary</h2>
+<h2>9. Results Summary</h2>
 <pre class="r"><code>cat(&quot;=== Final Results Summary ===\n&quot;)</code></pre>
 <pre><code>## === Final Results Summary ===</code></pre>
 <pre class="r"><code>if (nrow(baseline_data) &gt; 0) {

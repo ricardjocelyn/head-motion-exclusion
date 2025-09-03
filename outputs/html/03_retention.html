@@ -12,7 +12,7 @@
 
 <meta name="date" content="2025-09-02" />
 
-<title>retention analysis - refactored using claude</title>
+<title>Head motion and sociodemographics as independent correlates of retention:</title>
 
 <script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
 // be compatible with the behavior of Pandoc < 2.8).
@@ -349,8 +349,8 @@ display: none;
 
 
 
-<h1 class="title toc-ignore">retention analysis - refactored using
-claude</h1>
+<h1 class="title toc-ignore">Head motion and sociodemographics as
+independent correlates of retention:</h1>
 <h4 class="date">2025-09-02</h4>
 
 </div>
@@ -363,6 +363,7 @@ required_packages &lt;- c(
   &quot;lme4&quot;, &quot;dplyr&quot;, &quot;broom&quot;, &quot;bayestestR&quot;, &quot;ggplot2&quot;, &quot;stats&quot;, &quot;e1071&quot;, &quot;tidyr&quot;,
   &quot;patchwork&quot;, &quot;multcomp&quot;, &quot;lmerTest&quot;, &quot;broom.mixed&quot;, &quot;tableone&quot;, &quot;flextable&quot;,
   &quot;officer&quot;, &quot;readr&quot;, &quot;jsonlite&quot;, &quot;BayesFactor&quot;, &quot;MuMIn&quot;, &quot;brms&quot;, &quot;consort&quot;, &quot;ggplotify&quot;,
+  &quot;officer&quot;, &quot;readr&quot;, &quot;jsonlite&quot;, &quot;BayesFactor&quot;, &quot;MuMIn&quot;, &quot;brms&quot;, &quot;ggplotify&quot;,
   &quot;ggeffects&quot;, &quot;performance&quot;, &quot;forcats&quot;
 )
 
@@ -445,8 +446,8 @@ for (pkg in required_packages) {
 <pre class="r"><code>cat(&quot;✓ All packages loaded successfully\n&quot;)</code></pre>
 <pre><code>## ✓ All packages loaded successfully</code></pre>
 </div>
-<div id="configuration-constriants" class="section level2">
-<h2>2. configuration constriants</h2>
+<div id="configuration-constraints" class="section level2">
+<h2>2. configuration constraints</h2>
 <pre class="r"><code># Configuration constants
 CONFIG &lt;- list(
   motion_threshold = 0.2,
@@ -632,7 +633,15 @@ cat(&quot;✓ Created longitudinal dataset:&quot;, nrow(longitudinal_data), &quo
 <h2>5. retention models:</h2>
 <blockquote>
 <blockquote>
-<p><strong>Next</strong></p>
+<p><strong>We first examined the association between head motion and
+retention, adjusting for socioeconomic and demographic covariates.
+Starting with the most complex model, we tested the interaction between
+head motion and race, controlling for income, parental education,
+gender, and age (Supplemental Table S5). The interaction was not
+statistically significant (χ²(4) = 6.55, p = .16), and none of the
+individual interaction terms (of mean motion with each race category)
+had a significant p-value. Further, the Bayes factor strongly supported
+excluding the interaction (BF10 = 3.61e-07).</strong></p>
 </blockquote>
 </blockquote>
 <pre class="r"><code>cat(&quot;=== retention analysis ===\n&quot;)</code></pre>
@@ -640,7 +649,64 @@ cat(&quot;✓ Created longitudinal dataset:&quot;, nrow(longitudinal_data), &quo
 <pre class="r"><code># function that wants &quot;has_followup_data&quot; to be coded as 1/0, so I&#39;m changing that here
 baseline_data$has_followup_data &lt;- as.numeric(baseline_data$has_followup_data)
 
-# Full retention model with race/ethnicity
+# Test interaction between motion and race/ethnicity
+cat(&quot;\n=== motion × race/ethnicity interaction test ===\n&quot;)</code></pre>
+<pre><code>## 
+## === motion × race/ethnicity interaction test ===</code></pre>
+<pre class="r"><code># Additive model
+additive_model &lt;- glmer(
+  has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion + race_ethnicity_label + female + age_z +
+    (1 | rel_family_id) + 
+    (1 | site),
+  data = baseline_data, 
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# Interaction model
+interaction_model &lt;- glmer(
+  has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion * race_ethnicity_label + female + age_z +
+    (1 | rel_family_id) + 
+    (1 | site),
+  data = baseline_data, 
+  family = binomial,
+  control = CONFIG$model_control
+)
+
+# compare models
+interaction_comparison &lt;- anova(additive_model, interaction_model, test = &quot;F&quot;)
+print(interaction_comparison)</code></pre>
+<pre><code>## Data: baseline_data
+## Models:
+## additive_model: has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion + race_ethnicity_label + female + age_z + (1 | rel_family_id) + (1 | site)
+## interaction_model: has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion * race_ethnicity_label + female + age_z + (1 | rel_family_id) + (1 | site)
+##                   npar   AIC   BIC  logLik deviance  Chisq Df Pr(&gt;Chisq)
+## additive_model      12 11279 11364 -5627.7    11255                     
+## interaction_model   16 11281 11394 -5624.4    11249 6.5508  4     0.1616</code></pre>
+<pre class="r"><code># get bayes factor - bayesian comparison
+tryCatch({
+  bf_interaction &lt;- bayesfactor_models(additive_model,interaction_model)
+  print(bf_interaction)
+}, error = function(e) {
+  cat(&quot;⚠️ Interaction Bayesian comparison failed:&quot;, e$message, &quot;\n&quot;)
+})</code></pre>
+<pre><code>## Warning: The table contains very wide columns that don&#39;t fit into the available
+##   display-width of the console. Splitting tables into multiple parts did
+##   not have the desired effect.</code></pre>
+<pre><code>## Bayes Factors for Model Comparison
+## 
+##                    
+## [interaction_model]
+## 
+## Model                                                                                                                
+## income_z + parent_ed_z + rsfmri_meanmotion * race_ethnicity_label + female + age_z + (1 | rel_family_id) + (1 | site)
+## 
+##       BF
+## 3.61e-07
+## 
+## * Against Denominator: [additive_model] income_z + parent_ed_z + rsfmri_meanmotion + race_ethnicity_label + female + age_z + (1 | rel_family_id) + (1 | site)
+## *   Bayes Factor Type: BIC approximation</code></pre>
+<pre class="r"><code># Full retention model with race/ethnicity
 attrition_full_model &lt;- glmer(
   has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion + race_ethnicity_label + female + age_z +
     (1 | rel_family_id) + 
@@ -701,68 +767,11 @@ if (attrition_full_converged &amp;&amp; attrition_reduced_converged) {
 ## 
 ## Model R-squared values:</code></pre>
 <pre><code>## Warning: the null model is only correct if all the variables it uses are identical 
-## to those used in fitting the original model.
-## Warning: the null model is only correct if all the variables it uses are identical 
+## to those used in fitting the original model.</code></pre>
+<pre><code>## Warning: the null model is only correct if all the variables it uses are identical 
 ## to those used in fitting the original model.</code></pre>
 <pre><code>## Reduced model R²: 0.015 (marginal), 0.013 (conditional)
 ## Full model R²: 0.02 (marginal), 0.018 (conditional)</code></pre>
-<pre class="r"><code># Test interaction between motion and race/ethnicity
-cat(&quot;\n=== motion × race/ethnicity interaction test ===\n&quot;)</code></pre>
-<pre><code>## 
-## === motion × race/ethnicity interaction test ===</code></pre>
-<pre class="r"><code># Additive model
-additive_model &lt;- glmer(
-  has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion + race_ethnicity_label + female + age_z +
-    (1 | rel_family_id) + 
-    (1 | site),
-  data = baseline_data, 
-  family = binomial,
-  control = CONFIG$model_control
-)
-
-# Interaction model
-interaction_model &lt;- glmer(
-  has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion * race_ethnicity_label + female + age_z +
-    (1 | rel_family_id) + 
-    (1 | site),
-  data = baseline_data, 
-  family = binomial,
-  control = CONFIG$model_control
-)
-
-# compare models
-interaction_comparison &lt;- anova(additive_model, interaction_model, test = &quot;F&quot;)
-print(interaction_comparison)</code></pre>
-<pre><code>## Data: baseline_data
-## Models:
-## additive_model: has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion + race_ethnicity_label + female + age_z + (1 | rel_family_id) + (1 | site)
-## interaction_model: has_followup_data ~ income_z + parent_ed_z + rsfmri_meanmotion * race_ethnicity_label + female + age_z + (1 | rel_family_id) + (1 | site)
-##                   npar   AIC   BIC  logLik deviance  Chisq Df Pr(&gt;Chisq)
-## additive_model      12 11279 11364 -5627.7    11255                     
-## interaction_model   16 11281 11394 -5624.4    11249 6.5508  4     0.1616</code></pre>
-<pre class="r"><code># get bayes factor - bayesian comparison
-tryCatch({
-  bf_interaction &lt;- bayesfactor_models(additive_model,interaction_model)
-  print(bf_interaction)
-}, error = function(e) {
-  cat(&quot;⚠️ Interaction Bayesian comparison failed:&quot;, e$message, &quot;\n&quot;)
-})</code></pre>
-<pre><code>## Warning: The table contains very wide columns that don&#39;t fit into the available
-##   display-width of the console. Splitting tables into multiple parts did
-##   not have the desired effect.</code></pre>
-<pre><code>## Bayes Factors for Model Comparison
-## 
-##                    
-## [interaction_model]
-## 
-## Model                                                                                                                
-## income_z + parent_ed_z + rsfmri_meanmotion * race_ethnicity_label + female + age_z + (1 | rel_family_id) + (1 | site)
-## 
-##       BF
-## 3.61e-07
-## 
-## * Against Denominator: [additive_model] income_z + parent_ed_z + rsfmri_meanmotion + race_ethnicity_label + female + age_z + (1 | rel_family_id) + (1 | site)
-## *   Bayes Factor Type: BIC approximation</code></pre>
 </div>
 <div id="retention-full-model-summary" class="section level2">
 <h2>retention full model summary</h2>
@@ -816,8 +825,8 @@ tryCatch({
 ## female      -0.220 -0.010  0.000  0.093 -0.009 -0.009 -0.006 -0.006       
 ## age_z       -0.036 -0.010  0.013  0.120 -0.005  0.006 -0.012  0.002  0.049</code></pre>
 </div>
-<div id="retention-full-model-summary-1" class="section level2">
-<h2>retention full model summary</h2>
+<div id="retention-reduced-model-summary" class="section level2">
+<h2>retention reduced model summary</h2>
 <pre class="r"><code>summary(attrition_reduced_model)</code></pre>
 <pre><code>## Generalized linear mixed model fit by maximum likelihood (Laplace
 ##   Approximation) [glmerMod]
@@ -864,6 +873,15 @@ tryCatch({
 </div>
 <div id="return-bayes-factor-for-individual-race-predictors" class="section level1">
 <h1>return bayes factor for individual race predictors</h1>
+<p><strong>To further evaluate the importance of individual race
+categories, we calculated Bayes factors comparing models that combined
+each specific race group with White versus the full model that treated
+all race categories separately. The Bayes factor for Black was 2189.6,
+indicating strong evidence that Black participants should be modeled
+separately from White participants. In contrast, Hispanic, Asian, and
+Other groups showed BF10 values of 0.0177, 0.068, and 0.256
+respectively, indicating little evidence to model these categories
+separately.</strong></p>
 <pre class="r"><code>race_levels &lt;- levels(baseline_data$race_ethnicity_label)
 race_levels &lt;- race_levels[race_levels != &quot;White&quot;]  # exclude White since it&#39;s the reference
 
@@ -906,6 +924,15 @@ for (race in race_levels) {
 bf_results</code></pre>
 <pre><code>##        Black     Hispanic        Asian        Other 
 ## 2.189635e+03 1.770043e-02 6.832911e-02 2.560389e-01</code></pre>
+<p><strong>A likelihood ratio test comparing the full model (including
+all race indicators) to a reduced model (excluding race) also supported
+the inclusion of race overall (χ²(4) = 29.6, p = &lt; 0.001). However, a
+BIC-based Bayes factor comparing these two models yielded BF10 ≈ 0.04 in
+favor of the reduced model, suggesting that from a Bayesian model
+selection perspective, including all race indicators may not be
+justified by the increase in model complexity. The parameter estimates
+for other covariates were similar in the reduced model (Table 1, right
+side).</strong></p>
 <pre class="r"><code># BIC-BF for full vs reduced model
 bf_race = bayesfactor_models(
   attrition_full_model, attrition_reduced_model,
@@ -1266,6 +1293,16 @@ all_bfs$age_z</code></pre>
 ## *   Bayes Factor Type: BIC approximation</code></pre>
 <div id="return-odds-ratios-for-full-and-reduced-models" class="section level2">
 <h2>7. return odds ratios for full and reduced models</h2>
+<p><strong>We assessed the role of race/ethnicity in predicting
+follow-up participation using both frequentist and Bayesian approaches.
+Compared to White participants, the odds of retention were significantly
+lower for Black individuals (OR = 0.63, 95% CI [0.52, 0.75], p &lt;
+.001) and for those in the Other race category (OR = 0.80, 95% CI [0.67,
+0.95], p = .012), whereas no other race groups differed significantly
+from White participants. These effects are illustrated in Fig. 1 in
+terms of predicted probabilities (probability of retention), adjusted
+for all continuous covariates at their mean values for race/ethnicity
+and mean head motion.</strong></p>
 <pre class="r"><code>extract_OR_table &lt;- function(model) {
   # tidy output with confint
   tidy_mod &lt;- broom.mixed::tidy(model, effects = &quot;fixed&quot;, conf.int = TRUE, conf.level = 0.95)
@@ -1442,6 +1479,12 @@ ggsave(
 </div>
 <div id="results-summary" class="section level2">
 <h2>10. Results Summary</h2>
+<p><strong>Taken together, these results illustrate the complexity of
+modeling race/ethnicity. Although the overall contribution of race to
+model fit is ambiguous across inferential frameworks, there is
+consistent and strong evidence that Black participants are substantially
+less likely to have follow-up data compared to white participants, even
+after adjusting for socioeconomic and demographic factors.</strong></p>
 <pre class="r"><code>cat(&quot;=== Final Results Summary ===\n\n&quot;)</code></pre>
 <pre><code>## === Final Results Summary ===</code></pre>
 <pre class="r"><code># Sample sizes
