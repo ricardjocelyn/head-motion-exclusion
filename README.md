@@ -18,9 +18,7 @@ Jocelyn A. Ricard, BS [1,2]*, Russell A. Poldrack, PhD [2], Keith Humphreys, PhD
 
 ## background
 
-[background]
-
-
+In our paper, we address how head motion-related exclusions in MRI research affect sample representativeness and retention in the ABCD Study. We further describe how these patterns can have implications for the generalizability of neuroimaging findings in addiction research. 
 
 ## data
 
